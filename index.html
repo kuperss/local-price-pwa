@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta
+      name="description"
+      content="本機優先的價格表查詢 PWA，PDF 不上傳，索引只保存在裝置端。"
+    />
+    <meta name="theme-color" content="#17423c" />
+    <link rel="manifest" href="./manifest.webmanifest?v=11" />
+    <link rel="icon" href="./assets/icon.svg?v=11" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./assets/icon.svg?v=11" />
+    <link rel="stylesheet" href="./styles.css?v=11" />
+    <title>售價速查表</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-bar">
+        <div class="app-bar-main">
+          <div class="app-logo" aria-hidden="true">價</div>
+          <div class="app-bar-copy">
+            <p class="app-bar-label">本機離線</p>
+            <h1 class="app-bar-title">售價速查表</h1>
+          </div>
+        </div>
+        <div class="app-bar-side">
+          <span class="app-mode-pill">本機模式</span>
+          <p id="app-doc-label" class="app-doc-label">尚未載入價格表</p>
+        </div>
+      </header>
+
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Local First Tool</p>
+          <h1>售價速查表</h1>
+          <p class="hero-text">本機載入 PDF，離線速查價格與快速複製。</p>
+        </div>
+        <div class="hero-card">
+          <p class="hero-card-label">目前模式</p>
+          <p class="hero-card-title">單一售價表，本機匯入後會覆蓋舊版</p>
+          <p class="hero-card-text">只有本機已載入 PDF 的使用者，才看得到資料。</p>
+        </div>
+      </header>
+
+      <main class="main-layout">
+        <section class="control-panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-label">價格表</p>
+              <h2 id="document-title">尚未載入價格表</h2>
+            </div>
+            <div class="panel-actions">
+              <button id="import-button" class="primary-button" type="button">
+                載入 PDF
+              </button>
+              <button id="clear-button" class="ghost-button" type="button">
+                清除本機資料
+              </button>
+              <button
+                id="install-button"
+                class="ghost-button hidden"
+                type="button"
+              >
+                安裝到主畫面
+              </button>
+            </div>
+          </div>
+
+          <input id="file-input" type="file" accept="application/pdf" hidden />
+
+          <div class="document-meta" id="document-meta">
+            <div class="meta-pill">
+              <span class="meta-label">頁數</span>
+              <strong id="meta-pages">-</strong>
+            </div>
+            <div class="meta-pill">
+              <span class="meta-label">品項筆數</span>
+              <strong id="meta-count">-</strong>
+            </div>
+            <div class="meta-pill">
+              <span class="meta-label">最近更新</span>
+              <strong id="meta-updated">-</strong>
+            </div>
+          </div>
+
+          <form id="search-form" class="search-shell">
+            <label class="search-label" for="search-input">搜尋型號、價格或備註</label>
+            <div class="search-row">
+              <input
+                id="search-input"
+                type="search"
+                inputmode="search"
+                autocomplete="off"
+                placeholder="例如：A100、底價、贈品、開盤價"
+              />
+              <button class="primary-button search-button" type="submit">
+                搜尋
+              </button>
+            </div>
+          </form>
+
+          <div class="history-block">
+            <div class="history-head">
+              <p class="section-label">最近查詢</p>
+              <button id="clear-history-button" class="text-button" type="button">
+                清除
+              </button>
+            </div>
+            <div id="history-list" class="history-list"></div>
+          </div>
+
+          <div id="status-banner" class="status-banner" aria-live="polite">
+            尚未載入價格表，請先選擇本地 PDF。
+          </div>
+        </section>
+
+        <section class="results-panel">
+          <div class="results-head">
+            <div>
+              <p class="section-label">查詢結果</p>
+              <h2 id="results-title">等待匯入價格表</h2>
+            </div>
+            <p id="results-subtitle" class="results-subtitle">
+              匯入後會在本機建立索引，下次開啟會自動讀取。
+            </p>
+          </div>
+
+          <div id="empty-state" class="empty-state">
+            <p class="empty-title">先載入你的 PDF 價格表</p>
+            <p class="empty-text">
+              這個售價速查表不會上傳檔案，只會把解析後的資料與原始 PDF 保存在你的裝置。
+            </p>
+          </div>
+
+          <div id="results-list" class="results-list" aria-live="polite"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <nav class="mobile-dock" aria-label="快捷操作">
+      <button id="dock-search" class="dock-button" type="button">搜尋框</button>
+      <button id="dock-clear" class="dock-button dock-button-primary" type="button">
+        清空搜尋
+      </button>
+      <button id="dock-first" class="dock-button" type="button">第一筆</button>
+    </nav>
+
+    <div id="detail-overlay" class="detail-overlay hidden" aria-hidden="true">
+      <div id="detail-backdrop" class="detail-backdrop"></div>
+      <aside class="detail-sheet" aria-labelledby="detail-title">
+        <div class="detail-handle"></div>
+        <div class="detail-head">
+          <div>
+            <p class="section-label">品項細節</p>
+            <h2 id="detail-title">-</h2>
+          </div>
+          <button id="detail-close" class="icon-button" type="button" aria-label="關閉">
+            ✕
+          </button>
+        </div>
+
+        <div class="detail-grid" id="detail-grid"></div>
+
+        <div class="copy-zone">
+          <p class="section-label">快速複製</p>
+          <div id="copy-actions" class="copy-actions"></div>
+        </div>
+
+        <div class="preview-zone">
+          <div class="preview-head">
+            <div>
+              <p class="section-label">PDF 原頁</p>
+              <p id="preview-label" class="preview-label">第 - 頁</p>
+            </div>
+            <div class="preview-actions">
+              <button id="preview-prev" class="ghost-button small-button" type="button">
+                上一頁
+              </button>
+              <button id="preview-next" class="ghost-button small-button" type="button">
+                下一頁
+              </button>
+            </div>
+          </div>
+          <div class="preview-frame">
+            <canvas id="preview-canvas"></canvas>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <script type="module" src="./app.js?v=11"></script>
+  </body>
+</html>

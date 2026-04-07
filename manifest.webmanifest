@@ -1,0 +1,19 @@
+{
+  "name": "售價速查表",
+  "short_name": "售價速查",
+  "description": "本機優先的售價速查表 PWA，PDF 不上傳，索引只保存在裝置端。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4eee5",
+  "theme_color": "#17423c",
+  "lang": "zh-Hant",
+  "icons": [
+    {
+      "src": "./assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

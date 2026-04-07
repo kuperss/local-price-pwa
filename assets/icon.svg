@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#17423c" />
+      <stop offset="100%" stop-color="#2a7466" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#f4c46f" />
+      <stop offset="100%" stop-color="#e47a47" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="120" fill="url(#bg)" />
+  <path
+    d="M136 116h170l70 70v210c0 17.673-14.327 32-32 32H136c-17.673 0-32-14.327-32-32V148c0-17.673 14.327-32 32-32Z"
+    fill="#f9f3ea"
+    opacity="0.96"
+  />
+  <path d="M306 116v70h70" fill="#d6e8e3" />
+  <rect x="152" y="214" width="208" height="24" rx="12" fill="#17423c" opacity="0.18" />
+  <rect x="152" y="262" width="168" height="24" rx="12" fill="#17423c" opacity="0.18" />
+  <rect x="152" y="310" width="124" height="24" rx="12" fill="#17423c" opacity="0.18" />
+  <circle cx="352" cy="350" r="66" fill="url(#accent)" />
+  <path
+    d="M322 350h60M352 320v60"
+    stroke="#fff8ef"
+    stroke-linecap="round"
+    stroke-width="18"
+  />
+</svg>
