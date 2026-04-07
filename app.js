@@ -2,7 +2,7 @@ import * as pdfjsLib from "./vendor/pdfjs/pdf.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
 
-const APP_VERSION = "11";
+const APP_VERSION = "12";
 
 const DB_NAME = "local-price-pwa";
 const DB_VERSION = 1;
@@ -48,9 +48,6 @@ const refs = {
   installButton: document.querySelector("#install-button"),
   appDocLabel: document.querySelector("#app-doc-label"),
   documentTitle: document.querySelector("#document-title"),
-  metaPages: document.querySelector("#meta-pages"),
-  metaCount: document.querySelector("#meta-count"),
-  metaUpdated: document.querySelector("#meta-updated"),
   searchForm: document.querySelector("#search-form"),
   searchInput: document.querySelector("#search-input"),
   historyList: document.querySelector("#history-list"),
@@ -680,9 +677,6 @@ function renderShell() {
   if (refs.appDocLabel) {
     refs.appDocLabel.textContent = bundle ? bundle.fileName : "尚未載入價格表";
   }
-  refs.metaPages.textContent = bundle ? String(bundle.pageCount) : "-";
-  refs.metaCount.textContent = bundle ? String(bundle.entries.length) : "-";
-  refs.metaUpdated.textContent = bundle ? formatDateTime(bundle.importedAt) : "-";
 }
 
 function focusSearch() {
@@ -1149,20 +1143,6 @@ function normalizeForCompare(text) {
     .toLowerCase()
     .replace(/\s+/g, "")
     .replace(/[：:;,.，。/\\|｜()\[\]{}_-]/g, "");
-}
-
-function formatDateTime(isoString) {
-  if (!isoString) {
-    return "-";
-  }
-
-  return new Intl.DateTimeFormat("zh-Hant-TW", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(isoString));
 }
 
 function escapeHtml(text) {

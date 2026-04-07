@@ -193,7 +193,6 @@ button {
 .hero-card-text,
 .results-subtitle,
 .empty-text,
-.meta-label,
 .preview-label {
   color: var(--muted);
 }
@@ -318,26 +317,6 @@ button {
   border-radius: 50%;
   background: rgba(23, 66, 60, 0.07);
   color: var(--brand);
-  font-size: 1rem;
-}
-
-.document-meta {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 18px;
-}
-
-.meta-pill {
-  padding: 14px;
-  border-radius: var(--radius-md);
-  background: var(--surface-strong);
-  border: 1px solid var(--line);
-}
-
-.meta-pill strong {
-  display: block;
-  margin-top: 4px;
   font-size: 1rem;
 }
 
@@ -738,12 +717,8 @@ button {
     order: 3;
   }
 
-  .document-meta {
-    order: 4;
-  }
-
   .history-block {
-    order: 5;
+    order: 4;
   }
 
   .panel-head,
@@ -780,22 +755,6 @@ button {
 
   .panel-actions > button:nth-child(3) {
     grid-column: 1 / -1;
-  }
-
-  .document-meta {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
-    margin-top: 0;
-  }
-
-  .meta-pill {
-    min-height: 78px;
-    padding: 12px 10px;
-    border-radius: 18px;
-  }
-
-  .meta-pill strong {
-    font-size: 1rem;
   }
 
   .search-shell {
@@ -938,14 +897,6 @@ button {
   .app-doc-label {
     max-width: 96px;
     font-size: 0.7rem;
-  }
-
-  .document-meta {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .meta-pill:last-child {
-    grid-column: 1 / -1;
   }
 
   .price-strip {
