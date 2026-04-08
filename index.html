@@ -11,10 +11,10 @@
       content="本機優先的價格表查詢 PWA，PDF 不上傳，索引只保存在裝置端。"
     />
     <meta name="theme-color" content="#17423c" />
-    <link rel="manifest" href="./manifest.webmanifest?v=12" />
-    <link rel="icon" href="./assets/icon.svg?v=12" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="./assets/icon.svg?v=12" />
-    <link rel="stylesheet" href="./styles.css?v=12" />
+    <link rel="manifest" href="./manifest.webmanifest?v=26" />
+    <link rel="icon" href="./assets/icon.svg?v=26" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./assets/icon.svg?v=26" />
+    <link rel="stylesheet" href="./styles.css?v=26" />
     <title>售價速查表</title>
   </head>
   <body>
@@ -73,14 +73,14 @@
           <input id="file-input" type="file" accept="application/pdf" hidden />
 
           <form id="search-form" class="search-shell">
-            <label class="search-label" for="search-input">搜尋型號、價格或備註</label>
+            <label class="search-label" for="search-input">搜尋型號、價格或補充資訊</label>
             <div class="search-row">
               <input
                 id="search-input"
                 type="search"
                 inputmode="search"
                 autocomplete="off"
-                placeholder="例如：A100、底價、贈品、開盤價"
+                placeholder="例如：A100、底價、贈品、補充資訊"
               />
               <button class="primary-button search-button" type="submit">
                 搜尋
@@ -138,9 +138,9 @@
 
     <div id="detail-overlay" class="detail-overlay hidden" aria-hidden="true">
       <div id="detail-backdrop" class="detail-backdrop"></div>
-      <aside class="detail-sheet" aria-labelledby="detail-title">
-        <div class="detail-handle"></div>
-        <div class="detail-head">
+      <aside id="detail-sheet" class="detail-sheet" aria-labelledby="detail-title">
+        <div id="detail-handle" class="detail-handle"></div>
+        <div id="detail-head" class="detail-head">
           <div>
             <p class="section-label">品項細節</p>
             <h2 id="detail-title">-</h2>
@@ -179,6 +179,6 @@
       </aside>
     </div>
 
-    <script type="module" src="./app.js?v=12"></script>
+    <script type="module" src="./app.js?v=26"></script>
   </body>
 </html>

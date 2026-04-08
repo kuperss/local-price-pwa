@@ -2,7 +2,7 @@ import * as pdfjsLib from "./vendor/pdfjs/pdf.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
 
-const APP_VERSION = "12";
+const APP_VERSION = "26";
 
 const DB_NAME = "local-price-pwa";
 const DB_VERSION = 1;
@@ -13,7 +13,8 @@ const SEARCH_HISTORY_LIMIT = 6;
 const MAX_RESULTS_RENDER = 250;
 const ROW_TOLERANCE = 3;
 const HEADER_SEGMENT_GAP = 22;
-const BUNDLE_VERSION = 2;
+const BUNDLE_VERSION = 14;
+const DETAIL_ANIMATION_MS = 280;
 
 const COLUMN_DEFS = [
   { key: "sku", label: "型號", aliases: ["品編", "品号", "品號", "型號"] },
@@ -22,7 +23,11 @@ const COLUMN_DEFS = [
   { key: "basePrice", label: "底價", aliases: ["底價"] },
   { key: "tierPrice", label: "量價", aliases: ["量價", "批價", "批發價"] },
   { key: "openingPrice", label: "開盤價", aliases: ["開盤價"] },
-  { key: "note", label: "備註", aliases: ["備註", "說明", "備考"] },
+  { key: "note", label: "補充資訊", aliases: ["備註", "補充資訊", "說明", "備考"] },
+];
+
+const OPTIONAL_PARSE_COLUMNS = [
+  { key: "atPrice", label: "@", aliases: ["@", "＠"] },
 ];
 
 const COPYABLE_PRICE_KEYS = ["bonus", "basePrice", "tierPrice", "openingPrice"];
@@ -63,6 +68,9 @@ const refs = {
   dockFirst: document.querySelector("#dock-first"),
   detailOverlay: document.querySelector("#detail-overlay"),
   detailBackdrop: document.querySelector("#detail-backdrop"),
+  detailSheet: document.querySelector("#detail-sheet"),
+  detailHead: document.querySelector("#detail-head"),
+  detailHandle: document.querySelector("#detail-handle"),
   detailClose: document.querySelector("#detail-close"),
   detailTitle: document.querySelector("#detail-title"),
   detailGrid: document.querySelector("#detail-grid"),
@@ -72,6 +80,19 @@ const refs = {
   previewPrev: document.querySelector("#preview-prev"),
   previewNext: document.querySelector("#preview-next"),
 };
+
+const detailSheetDrag = {
+  active: false,
+  startY: 0,
+  startX: 0,
+  distance: 0,
+  startScrollTop: 0,
+  lastY: 0,
+  lastTime: 0,
+  velocity: 0,
+};
+
+let detailCloseTimer = null;
 
 init().catch((error) => {
   console.error(error);
@@ -99,6 +120,10 @@ function bindEvents() {
   refs.resultsList.addEventListener("click", onResultsClick);
   refs.detailBackdrop.addEventListener("click", closeDetail);
   refs.detailClose.addEventListener("click", closeDetail);
+  refs.detailSheet?.addEventListener("touchstart", onDetailTouchStart, { passive: true });
+  refs.detailSheet?.addEventListener("touchmove", onDetailTouchMove, { passive: false });
+  refs.detailSheet?.addEventListener("touchend", onDetailTouchEnd);
+  refs.detailSheet?.addEventListener("touchcancel", onDetailTouchEnd);
   refs.previewPrev.addEventListener("click", () => changePreviewPage(-1));
   refs.previewNext.addEventListener("click", () => changePreviewPage(1));
   refs.installButton.addEventListener("click", installApp);
@@ -159,8 +184,48 @@ async function buildBundle(fileName, arrayBuffer, hash) {
     const page = await pdfDoc.getPage(pageNumber);
     const textContent = await page.getTextContent();
     const rows = extractRows(textContent.items);
+    const pageHasAtPrice = rows.some((row) => /[@＠]/.test(row.rawText));
+    let activeHeader = null;
+    let sectionStartIndex = entries.length;
+    let sharedFields = {};
 
     for (const row of rows) {
+      const normalizedRowText = normalizeRowText(row.rawText);
+      const detectedHeader = detectHeader(row);
+      if (detectedHeader) {
+        activeHeader = detectedHeader;
+        sectionStartIndex = entries.length;
+        sharedFields = {};
+        continue;
+      }
+
+      if (activeHeader) {
+        if (isCategoryRowText(normalizedRowText)) {
+          sectionStartIndex = entries.length;
+          sharedFields = {};
+          continue;
+        }
+
+        const mappedEntry = mapRowToEntry(row, activeHeader, pageNumber);
+        if (mappedEntry) {
+          mappedEntry._pageHasAtPrice = pageHasAtPrice;
+          const normalizedEntry = normalizeMappedEntry(mappedEntry);
+          if (isSharedFieldEntry(normalizedEntry)) {
+            sharedFields = promoteSectionBonusToShared(entries, sharedFields, pageNumber, sectionStartIndex);
+            sharedFields = updateSharedFields(sharedFields, normalizedEntry);
+            backfillSharedFields(entries, sharedFields, pageNumber, sectionStartIndex);
+          } else {
+            if (sharedFields.sharedBonusActive && normalizedEntry.bonus) {
+              sharedFields = updateSharedFields(sharedFields, normalizedEntry);
+              normalizedEntry.bonus = "";
+              backfillSharedFields(entries, sharedFields, pageNumber, sectionStartIndex);
+            }
+            mergeEntry(entries, applySharedFields(normalizedEntry, sharedFields));
+          }
+        }
+        continue;
+      }
+
       const parsedRow = parseRowRecord(row.rawText, pageNumber);
       if (parsedRow.type === "ignore") {
         continue;
@@ -240,9 +305,14 @@ function buildEntryFromPattern(text, priceTokens, pageNumber) {
   }
 
   const prices = priceTokens.map((token) => token.value);
-  const basePrice = prices[0] || "";
-  const tierPrice = prices[1] || "";
-  const openingPrice = prices[2] || "";
+  const abcPrices = prices.slice(-3);
+  const basePrice = abcPrices[0] || "";
+  const tierPrice = abcPrices[1] || "";
+  const openingPrice = abcPrices[2] || "";
+  const prefixPrices = prices.slice(0, Math.max(0, prices.length - 3));
+  if (!retailPrice && prefixPrices.length) {
+    retailPrice = prefixPrices.at(-1) || "";
+  }
 
   return {
     sku: skuAndNote.sku,
@@ -274,6 +344,224 @@ function extractPriceTokens(text) {
   return results;
 }
 
+function normalizeMappedEntry(entry) {
+  const skuAndNote = extractSkuAndNote(entry.sku || "");
+  const trailingNote = skuAndNote.note || "";
+  const explicitNote = cleanCellText(entry.note);
+  const normalizedAtPrice = normalizePriceCell(entry.atPrice);
+  const normalizedRetailPrice = normalizePriceCell(entry.retailPrice);
+  let normalizedBonus = cleanCellText(entry.bonus);
+  const hasAtPriceColumn = Boolean(entry._headerHasAtPrice || entry._pageHasAtPrice);
+
+  // Some layouts shift 建議售價 one column into 搭贈 when the header lands slightly off.
+  // Real 搭贈 values are usually patterns like 10+1, 30+5, //, 23+2// instead of a plain price.
+  let repairedRetailPrice = stripAtPricePrefix(normalizedRetailPrice, normalizedAtPrice);
+  if (hasAtPriceColumn && !normalizedAtPrice) {
+    repairedRetailPrice = splitConcatenatedRetailPrice(repairedRetailPrice);
+  }
+  const splitBonus = splitRetailBonusValue(normalizedBonus);
+  if (!repairedRetailPrice && splitBonus.retailPrice) {
+    repairedRetailPrice = splitBonus.retailPrice;
+  }
+  normalizedBonus = splitBonus.bonus;
+  if (!repairedRetailPrice && normalizedBonus && looksLikePlainPrice(normalizedBonus)) {
+    repairedRetailPrice = normalizedBonus;
+    normalizedBonus = "";
+  }
+
+  return {
+    ...entry,
+    sku: skuAndNote.sku || cleanCellText(entry.sku),
+    retailPrice: repairedRetailPrice,
+    basePrice: normalizePriceCell(entry.basePrice),
+    tierPrice: normalizePriceCell(entry.tierPrice),
+    openingPrice: normalizePriceCell(entry.openingPrice),
+    bonus: normalizedBonus,
+    note: [trailingNote, explicitNote].filter(Boolean).join(" ").trim(),
+  };
+}
+
+function normalizePriceCell(value) {
+  return String(value || "")
+    .replace(/\$/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+function looksLikePlainPrice(value) {
+  return /^\d[\d,]*$/.test(String(value || "").trim());
+}
+
+function stripAtPricePrefix(retailPrice, atPrice) {
+  if (!retailPrice || !atPrice) {
+    return retailPrice;
+  }
+
+  if (retailPrice === atPrice) {
+    return "";
+  }
+
+  if (!retailPrice.startsWith(atPrice)) {
+    return retailPrice;
+  }
+
+  const stripped = retailPrice.slice(atPrice.length);
+  return looksLikePlainPrice(stripped) ? stripped : retailPrice;
+}
+
+function splitConcatenatedRetailPrice(retailPrice) {
+  if (!looksLikePlainPrice(retailPrice) || retailPrice.length < 4) {
+    return retailPrice;
+  }
+
+  for (const prefixLength of [2, 1]) {
+    if (retailPrice.length <= prefixLength + 1) {
+      continue;
+    }
+
+    const prefix = retailPrice.slice(0, prefixLength);
+    const suffix = retailPrice.slice(prefixLength);
+    if (!looksLikePlainPrice(prefix) || !looksLikePlainPrice(suffix)) {
+      continue;
+    }
+
+    if (suffix.length >= 2) {
+      return suffix;
+    }
+  }
+
+  return retailPrice;
+}
+
+function splitRetailBonusValue(bonusValue) {
+  const normalized = normalizeSharedBonus(bonusValue);
+  if (!normalized) {
+    return {
+      retailPrice: "",
+      bonus: "",
+    };
+  }
+
+  for (let index = normalized.length - 1; index >= 2; index -= 1) {
+    const retailPrice = normalized.slice(0, index);
+    const bonus = normalized.slice(index);
+    if (!looksLikePlainPrice(retailPrice)) {
+      continue;
+    }
+    if (!isStructuredBonusValue(bonus)) {
+      continue;
+    }
+    return {
+      retailPrice,
+      bonus,
+    };
+  }
+
+  return {
+    retailPrice: "",
+    bonus: normalized,
+  };
+}
+
+function isStructuredBonusValue(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  if (normalized === "//") {
+    return true;
+  }
+
+  const trimmed = normalized.replace(/\/+$/g, "");
+  if (!trimmed.includes("+")) {
+    return false;
+  }
+
+  return trimmed
+    .split("/")
+    .filter(Boolean)
+    .every((part) => /^[1-9]\d*\+\d+$/.test(part));
+}
+
+function isSharedFieldEntry(entry) {
+  const hasSku = Boolean(entry.sku);
+  const hasPrice = Boolean(
+    entry.retailPrice || entry.basePrice || entry.tierPrice || entry.openingPrice,
+  );
+  return !hasSku && !hasPrice && Boolean(entry.bonus);
+}
+
+function updateSharedFields(sharedFields, entry) {
+  return {
+    ...sharedFields,
+    bonus: entry.bonus ? mergeSharedBonus(sharedFields.bonus, entry.bonus) : sharedFields.bonus || "",
+    sharedBonusActive: sharedFields.sharedBonusActive || isSharedFieldEntry(entry),
+  };
+}
+
+function applySharedFields(entry, sharedFields) {
+  return {
+    ...entry,
+    bonus: sharedFields.sharedBonusActive
+      ? sharedFields.bonus || entry.bonus || ""
+      : entry.bonus || sharedFields.bonus || "",
+  };
+}
+
+function backfillSharedFields(entries, sharedFields, pageNumber, sectionStartIndex) {
+  for (let index = entries.length - 1; index >= sectionStartIndex; index -= 1) {
+    const entry = entries[index];
+    if (entry.pageNumber !== pageNumber) {
+      break;
+    }
+
+    if (sharedFields.bonus) {
+      entry.bonus = sharedFields.bonus;
+    }
+  }
+}
+
+function normalizeSharedBonus(value) {
+  return cleanCellText(value).replace(/\s+/g, "");
+}
+
+function mergeSharedBonus(existingValue, incomingValue) {
+  const existing = normalizeSharedBonus(existingValue);
+  const incoming = normalizeSharedBonus(incomingValue);
+
+  if (!incoming) {
+    return existing;
+  }
+
+  if (!existing) {
+    return incoming;
+  }
+
+  if (existing.includes(incoming)) {
+    return existing;
+  }
+
+  const separator = existing.endsWith("/") || incoming.startsWith("/") ? "" : "/";
+  return `${existing}${separator}${incoming}`;
+}
+
+function promoteSectionBonusToShared(entries, sharedFields, pageNumber, sectionStartIndex) {
+  let nextSharedFields = { ...sharedFields, sharedBonusActive: true };
+
+  for (let index = sectionStartIndex; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (entry.pageNumber !== pageNumber || !entry.bonus) {
+      continue;
+    }
+
+    nextSharedFields = updateSharedFields(nextSharedFields, entry);
+    entry.bonus = "";
+  }
+
+  return nextSharedFields;
+}
+
 function extractSkuAndNote(prefix) {
   const normalized = prefix
     .replace(/／/g, "/")
@@ -281,6 +569,14 @@ function extractSkuAndNote(prefix) {
     .replace(/[）]/g, ")")
     .replace(/\s+/g, " ")
     .trim();
+
+  const leadingSkuMatch = normalized.match(/^([A-Z0-9][A-Z0-9.-]*(?:\s*\/[A-Z0-9.-]+)?)(.*)$/i);
+  if (leadingSkuMatch) {
+    return {
+      sku: leadingSkuMatch[1].replace(/\s+/g, ""),
+      note: leadingSkuMatch[2].trim(),
+    };
+  }
 
   const tokens = normalized.split(" ").filter(Boolean);
   const skuTokens = [];
@@ -460,27 +756,55 @@ function mergeSegments(items, gapThreshold) {
 function detectHeader(row) {
   const headerSegments = [];
 
-  for (const segment of row.segments) {
-    const normalized = normalizeForCompare(segment.text);
-    const match = COLUMN_DEFS.find((column) =>
-      column.aliases.some((alias) => normalized.includes(normalizeForCompare(alias))),
-    );
+  for (let index = 0; index < row.items.length; index += 1) {
+    const item = row.items[index];
+    const nextItem = row.items[index + 1];
+    const candidates = [
+      {
+        text: item.text,
+        x: item.x,
+      },
+    ];
 
-    if (match) {
-      headerSegments.push({
-        key: match.key,
-        x: segment.x,
-        label: match.label,
+    if (nextItem) {
+      candidates.push({
+        text: `${item.text}${nextItem.text}`,
+        x: Math.min(item.x, nextItem.x),
       });
+    }
+
+    for (const candidate of candidates) {
+      const normalized = normalizeForCompare(candidate.text);
+      const match = findBestHeaderMatch(normalized);
+
+      if (match) {
+        headerSegments.push({
+          key: match.column.key,
+          x: candidate.x,
+          label: match.column.label,
+          score: match.score,
+        });
+      }
     }
   }
 
-  const unique = headerSegments.filter(
-    (segment, index, all) => all.findIndex((entry) => entry.key === segment.key) === index,
-  );
+  const unique = [];
+  for (const segment of headerSegments) {
+    const existing = unique.find((entry) => entry.key === segment.key);
+    if (!existing) {
+      unique.push(segment);
+      continue;
+    }
+    if (segment.score > existing.score || (segment.score === existing.score && segment.x > existing.x)) {
+      Object.assign(existing, segment);
+    }
+  }
 
   const hasSku = unique.some((segment) => segment.key === "sku");
-  if (!hasSku || unique.length < 4) {
+  const hasBase = unique.some((segment) => segment.key === "basePrice");
+  const hasTier = unique.some((segment) => segment.key === "tierPrice");
+  const hasOpening = unique.some((segment) => segment.key === "openingPrice");
+  if (!hasSku || !hasBase || !hasTier || !hasOpening) {
     return null;
   }
 
@@ -492,6 +816,7 @@ function detectHeader(row) {
       return {
         key: segment.key,
         label: segment.label,
+        x: segment.x,
         minX: previous ? (previous.x + segment.x) / 2 : Number.NEGATIVE_INFINITY,
         maxX: next ? (segment.x + next.x) / 2 : Number.POSITIVE_INFINITY,
       };
@@ -499,14 +824,47 @@ function detectHeader(row) {
   };
 }
 
+function findBestHeaderMatch(normalizedText) {
+  let bestMatch = null;
+  for (const column of [...COLUMN_DEFS, ...OPTIONAL_PARSE_COLUMNS]) {
+    for (const alias of column.aliases) {
+      const normalizedAlias = normalizeForCompare(alias);
+      if (!normalizedAlias || !normalizedText.includes(normalizedAlias)) {
+        continue;
+      }
+
+      let score = 1;
+      if (normalizedText === normalizedAlias) {
+        score = 3;
+      } else if (
+        normalizedText.startsWith(normalizedAlias) ||
+        normalizedText.endsWith(normalizedAlias)
+      ) {
+        score = 2;
+      }
+
+      if (!bestMatch || score > bestMatch.score) {
+        bestMatch = {
+          column,
+          score,
+        };
+      }
+    }
+  }
+  return bestMatch;
+}
+
 function mapRowToEntry(row, header, pageNumber) {
   const cells = Object.fromEntries(COLUMN_DEFS.map((column) => [column.key, ""]));
 
   for (const item of row.items) {
     const centerX = item.x + item.width / 2;
-    const column = header.columns.find(
-      (entry) => centerX >= entry.minX && centerX < entry.maxX,
-    );
+    const column = header.columns.reduce((closest, entry) => {
+      if (!closest) {
+        return entry;
+      }
+      return Math.abs(centerX - entry.x) < Math.abs(centerX - closest.x) ? entry : closest;
+    }, null);
 
     if (!column) {
       continue;
@@ -525,6 +883,7 @@ function mapRowToEntry(row, header, pageNumber) {
 
   return {
     ...cells,
+    _headerHasAtPrice: header.columns.some((column) => column.key === "atPrice"),
     pageNumber,
   };
 }
@@ -537,6 +896,10 @@ function isNoiseRow(row, cells) {
   ).length;
 
   if (!hasAnyField) {
+    return true;
+  }
+
+  if (isCategoryRowText(row.rawText)) {
     return true;
   }
 
@@ -789,7 +1152,7 @@ function renderResults() {
     refs.emptyState.classList.remove("hidden");
     refs.emptyState.querySelector(".empty-title").textContent = "查無符合結果";
     refs.emptyState.querySelector(".empty-text").textContent =
-      "可以換關鍵字試試，或直接用型號、底價、開盤價、備註內文字搜尋。";
+      "可以換關鍵字試試，或直接用型號、底價、開盤價、補充資訊內文字搜尋。";
     refs.resultsList.innerHTML = "";
     updateDockState();
     return;
@@ -810,7 +1173,7 @@ function renderCard(entry) {
         </div>
         <span class="page-pill">第 ${entry.pageNumber} 頁</span>
       </div>
-      <p class="card-note">${escapeHtml(entry.note || "無備註")}</p>
+      <p class="card-note">${escapeHtml(entry.note || "無補充資訊")}</p>
       ${
         entry.bonus
           ? `<p class="card-extra"><strong>搭贈：</strong>${escapeHtml(entry.bonus)}</p>`
@@ -903,6 +1266,7 @@ async function copyField(entry, key) {
 }
 
 function openDetail(entry) {
+  window.clearTimeout(detailCloseTimer);
   state.selectedEntry = entry;
   state.previewPage = entry.pageNumber;
 
@@ -930,6 +1294,11 @@ function openDetail(entry) {
 
   refs.detailOverlay.classList.remove("hidden");
   refs.detailOverlay.setAttribute("aria-hidden", "false");
+  document.body.classList.add("detail-open");
+  resetDetailSheetPosition();
+  window.requestAnimationFrame(() => {
+    refs.detailOverlay.classList.add("is-visible");
+  });
   renderPreviewPage().catch((error) => {
     if (error?.name !== "RenderingCancelledException") {
       console.error(error);
@@ -946,10 +1315,156 @@ function renderDetailItem(column, entry) {
   `;
 }
 
-function closeDetail() {
+function closeDetail(options = {}) {
+  const { immediate = false } = options;
+  detailSheetDrag.active = false;
+  window.clearTimeout(detailCloseTimer);
+
+  if (refs.detailOverlay.classList.contains("hidden")) {
+    finalizeCloseDetail();
+    return;
+  }
+
+  if (immediate) {
+    finalizeCloseDetail();
+    return;
+  }
+
+  refs.detailOverlay.classList.remove("is-visible");
+  if (refs.detailSheet) {
+    refs.detailSheet.style.transform = "translateY(calc(100% + 24px)) scale(0.985)";
+    refs.detailSheet.style.opacity = "0.94";
+  }
+  if (refs.detailBackdrop) {
+    refs.detailBackdrop.style.background = "rgba(16, 31, 28, 0)";
+    refs.detailBackdrop.style.backdropFilter = "blur(0px)";
+  }
+
+  detailCloseTimer = window.setTimeout(() => {
+    finalizeCloseDetail();
+  }, DETAIL_ANIMATION_MS);
+}
+
+function finalizeCloseDetail() {
+  window.clearTimeout(detailCloseTimer);
+  resetDetailSheetPosition();
   refs.detailOverlay.classList.add("hidden");
+  refs.detailOverlay.classList.remove("is-visible");
   refs.detailOverlay.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("detail-open");
   state.selectedEntry = null;
+}
+
+function onDetailTouchStart(event) {
+  if (event.touches.length !== 1 || !refs.detailSheet) {
+    return;
+  }
+
+  const touch = event.touches[0];
+  detailSheetDrag.active = true;
+  detailSheetDrag.startY = touch.clientY;
+  detailSheetDrag.startX = touch.clientX;
+  detailSheetDrag.distance = 0;
+  detailSheetDrag.startScrollTop = refs.detailSheet.scrollTop;
+  detailSheetDrag.lastY = touch.clientY;
+  detailSheetDrag.lastTime = performance.now();
+  detailSheetDrag.velocity = 0;
+}
+
+function onDetailTouchMove(event) {
+  if (!detailSheetDrag.active || !refs.detailSheet) {
+    return;
+  }
+
+  const touch = event.touches[0];
+  const deltaY = touch.clientY - detailSheetDrag.startY;
+  const deltaX = Math.abs(touch.clientX - detailSheetDrag.startX);
+  const now = performance.now();
+
+  if (deltaY <= 0 || deltaX > Math.abs(deltaY) || detailSheetDrag.startScrollTop > 0) {
+    detailSheetDrag.distance = 0;
+    return;
+  }
+
+  const elapsed = Math.max(1, now - detailSheetDrag.lastTime);
+  detailSheetDrag.velocity = (touch.clientY - detailSheetDrag.lastY) / elapsed;
+  detailSheetDrag.lastY = touch.clientY;
+  detailSheetDrag.lastTime = now;
+
+  const dampedDistance = rubberBandDistance(deltaY, 220);
+  detailSheetDrag.distance = dampedDistance;
+  event.preventDefault();
+  applyDetailSheetDrag(dampedDistance);
+}
+
+function onDetailTouchEnd() {
+  if (!detailSheetDrag.active) {
+    return;
+  }
+
+  const shouldClose = detailSheetDrag.distance > 110 || (detailSheetDrag.velocity > 0.55 && detailSheetDrag.distance > 28);
+  detailSheetDrag.active = false;
+
+  if (shouldClose) {
+    closeDetail();
+    return;
+  }
+
+  resetDetailSheetPosition();
+}
+
+function applyDetailSheetDrag(distance) {
+  if (!refs.detailSheet || !refs.detailBackdrop) {
+    return;
+  }
+
+  const progress = Math.min(1, distance / 180);
+  const sheetScale = 1 - progress * 0.018;
+  refs.detailSheet.style.transform = `translateY(${distance}px) scale(${sheetScale})`;
+  refs.detailSheet.style.opacity = String(Math.max(0.94, 1 - distance / 1200));
+  const opacity = Math.max(0.12, 0.42 - distance / 320);
+  refs.detailBackdrop.style.background = `rgba(16, 31, 28, ${opacity})`;
+  refs.detailBackdrop.style.backdropFilter = `blur(${Math.max(0, 6 - distance / 40)}px)`;
+  if (refs.detailHandle) {
+    refs.detailHandle.style.transform = `translateY(${progress * 2}px) scaleX(${1 + progress * 0.08})`;
+    refs.detailHandle.style.opacity = String(Math.max(0.45, 1 - progress * 0.35));
+  }
+  if (refs.detailHead) {
+    refs.detailHead.style.transform = `translateY(${progress * 4}px)`;
+  }
+  if (refs.detailTitle) {
+    refs.detailTitle.style.transform = `scale(${1 - progress * 0.035})`;
+    refs.detailTitle.style.transformOrigin = "left center";
+  }
+}
+
+function resetDetailSheetPosition() {
+  if (!refs.detailSheet || !refs.detailBackdrop) {
+    return;
+  }
+
+  refs.detailSheet.style.transform = "";
+  refs.detailSheet.style.opacity = "";
+  refs.detailBackdrop.style.background = "";
+  refs.detailBackdrop.style.backdropFilter = "";
+  if (refs.detailHandle) {
+    refs.detailHandle.style.transform = "";
+    refs.detailHandle.style.opacity = "";
+  }
+  if (refs.detailHead) {
+    refs.detailHead.style.transform = "";
+  }
+  if (refs.detailTitle) {
+    refs.detailTitle.style.transform = "";
+    refs.detailTitle.style.transformOrigin = "";
+  }
+  detailSheetDrag.distance = 0;
+  detailSheetDrag.velocity = 0;
+}
+
+function rubberBandDistance(distance, maxDistance) {
+  const constrained = Math.max(0, distance);
+  return (constrained * maxDistance) / (constrained + maxDistance);
 }
 
 async function renderPreviewPage() {
