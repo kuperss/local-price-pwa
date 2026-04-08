@@ -944,8 +944,12 @@ body.detail-open .mobile-dock {
 
   .detail-sheet {
     max-height: 92vh;
-    padding: 12px 14px calc(18px + var(--safe-bottom));
-    touch-action: pan-x pinch-zoom;
+    min-height: 0;
+    max-height: min(92vh, calc(100dvh - var(--safe-top) - 8px));
+    padding: 12px 14px calc(96px + var(--safe-bottom));
+    touch-action: pan-y pinch-zoom;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
   }
 
   .detail-head {

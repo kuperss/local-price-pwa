@@ -2,7 +2,7 @@ import * as pdfjsLib from "./vendor/pdfjs/pdf.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
 
-const APP_VERSION = "26";
+const APP_VERSION = "27";
 
 const DB_NAME = "local-price-pwa";
 const DB_VERSION = 1;
