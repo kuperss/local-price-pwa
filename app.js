@@ -2,7 +2,7 @@ import * as pdfjsLib from "./vendor/pdfjs/pdf.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
 
-const APP_VERSION = "44";
+const APP_VERSION = "45";
 
 const DB_NAME = "local-price-pwa";
 const DB_VERSION = 1;
@@ -13,7 +13,7 @@ const SEARCH_HISTORY_LIMIT = 6;
 const MAX_RESULTS_RENDER = 250;
 const ROW_TOLERANCE = 3;
 const HEADER_SEGMENT_GAP = 22;
-const BUNDLE_VERSION = 24;
+const BUNDLE_VERSION = 27;
 const V2_PROFILE_ID = "price-sheet-202604-v2";
 const V2_PROFILE_VERSION = 1;
 const V2_FILE_NAME_PATTERN = /202604\)?v2/i;
@@ -340,14 +340,22 @@ function detectDocumentProfile(fileName, hash, firstRows) {
 
 async function buildV2BundleFromDocument({ fileName, hash, pdfDoc, pageCount, storedPdfBytes, profile }) {
   const entries = [];
+  let lastKnownHeader = null;
 
   for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
     setStatus(`正在套用 202604V2 專用解析：第 ${pageNumber} / ${pageCount} 頁...`);
     const page = await pdfDoc.getPage(pageNumber);
     const rows = extractRows((await page.getTextContent()).items);
-    const header = detectV2Header(rows);
+    const detectedHeader = detectV2Header(rows);
+    const headerSource = detectedHeader ? "新偵測" : (lastKnownHeader ? "沿用上頁" : "無");
+    if (detectedHeader) {
+      lastKnownHeader = detectedHeader;
+    }
+    const header = detectedHeader || lastKnownHeader;
 
+    const entriesBefore = entries.length;
     if (!header) {
+      console.log(`[V2解析] 第 ${pageNumber}/${pageCount} 頁：header=${headerSource}，跳過整頁`);
       continue;
     }
 
@@ -443,6 +451,10 @@ async function buildV2BundleFromDocument({ fileName, hash, pdfDoc, pageCount, st
         searchAliases: buildV2SearchAliases(parsed.entry),
         pageNumber,
       };
+      const hasAnyPrice = entry.retailPrice || entry.basePrice || entry.tierPrice || entry.openingPrice;
+      if (!hasAnyPrice) {
+        continue;
+      }
       entries.push(entry);
 
       if (sectionState.sharedNote && !shouldApplySharedNote) {
@@ -451,7 +463,9 @@ async function buildV2BundleFromDocument({ fileName, hash, pdfDoc, pageCount, st
         sectionState.sharedNoteSignature = "";
       }
     }
+    console.log(`[V2解析] 第 ${pageNumber}/${pageCount} 頁：header=${headerSource}，本頁加入 ${entries.length - entriesBefore} 筆，累計 ${entries.length} 筆`);
   }
+  console.log(`[V2解析] 解析完成，共 ${entries.length} 筆`);
 
   return {
     id: ACTIVE_DOCUMENT_KEY,
@@ -1730,7 +1744,9 @@ function entryMatchesSearch(entry, normalized) {
       .map((value) => normalizeForCompare(value))
       .filter(Boolean);
 
-    return aliases.some((alias) => alias === normalized || alias.startsWith(normalized));
+    if (aliases.some((alias) => alias === normalized || alias.startsWith(normalized))) {
+      return true;
+    }
   }
 
   return (entry.searchText || "").includes(normalized);
@@ -2366,12 +2382,7 @@ function normalizeForCompare(text) {
   return String(text || "")
     .toLowerCase()
     .replace(/\s+/g, "")
-    .replace(/[;,.\\|()[\]{}_\-\/／"']/g, "");
-
-  return String(text || "")
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[：:;,.，。/\\|｜()\[\]{}_-]/g, "");
+    .replace(/[：:;,.，。/\\|｜()[\]{}_-]/g, "");
 }
 
 function escapeHtml(text) {
