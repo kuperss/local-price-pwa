@@ -1,11 +1,11 @@
-const CACHE_NAME = "local-price-pwa-v27";
+const CACHE_NAME = "local-price-pwa-v44";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=27",
-  "./app.js?v=27",
-  "./manifest.webmanifest?v=27",
-  "./assets/icon.svg?v=27",
+  "./styles.css?v=44",
+  "./app.js?v=44",
+  "./manifest.webmanifest?v=44",
+  "./assets/icon.svg?v=44",
   "./vendor/pdfjs/pdf.mjs",
   "./vendor/pdfjs/pdf.worker.mjs",
   "./vendor/pdfjs/LICENSE",

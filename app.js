@@ -2,7 +2,7 @@ import * as pdfjsLib from "./vendor/pdfjs/pdf.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
 
-const APP_VERSION = "27";
+const APP_VERSION = "44";
 
 const DB_NAME = "local-price-pwa";
 const DB_VERSION = 1;
@@ -13,7 +13,40 @@ const SEARCH_HISTORY_LIMIT = 6;
 const MAX_RESULTS_RENDER = 250;
 const ROW_TOLERANCE = 3;
 const HEADER_SEGMENT_GAP = 22;
-const BUNDLE_VERSION = 14;
+const BUNDLE_VERSION = 24;
+const V2_PROFILE_ID = "price-sheet-202604-v2";
+const V2_PROFILE_VERSION = 1;
+const V2_FILE_NAME_PATTERN = /202604\)?v2/i;
+const V2_HEADER_ALIASES = {
+  sku: ["品編", "型號"],
+  retailPrice: ["建議售價"],
+  bonus: ["搭贈"],
+  basePrice: ["底價", "A"],
+  tierPrice: ["量價", "B"],
+  openingPrice: ["開盤價", "C"],
+  note: ["備註", "補充資訊"],
+};
+const CANONICAL_HEADER_ALIASES = {
+  sku: ["品編", "型號"],
+  retailPrice: ["建議售價"],
+  bonus: ["搭贈"],
+  basePrice: ["底價", "A"],
+  tierPrice: ["量價", "B"],
+  openingPrice: ["開盤價", "C"],
+  note: ["備註", "補充資訊"],
+  atPrice: ["@"],
+};
+
+const EXPLICIT_HEADER_ALIASES = {
+  sku: ["品編", "型號"],
+  retailPrice: ["建議售價"],
+  bonus: ["搭贈"],
+  basePrice: ["底價", "A"],
+  tierPrice: ["量價", "B"],
+  openingPrice: ["開盤價", "C"],
+  note: ["備註", "補充資訊"],
+  atPrice: ["@"],
+};
 const DETAIL_ANIMATION_MS = 280;
 
 const COLUMN_DEFS = [
@@ -31,6 +64,12 @@ const OPTIONAL_PARSE_COLUMNS = [
 ];
 
 const COPYABLE_PRICE_KEYS = ["bonus", "basePrice", "tierPrice", "openingPrice"];
+const COPY_LABELS = {
+  bonus: "搭贈",
+  basePrice: "特案價",
+  tierPrice: "量價",
+  openingPrice: "單價",
+};
 
 const state = {
   bundle: null,
@@ -177,6 +216,23 @@ async function buildBundle(fileName, arrayBuffer, hash) {
   const parserPdfBytes = sourceBytes.slice();
   const pdfDoc = await pdfjsLib.getDocument({ data: parserPdfBytes }).promise;
   const pageCount = pdfDoc.numPages;
+  const firstPage = await pdfDoc.getPage(1);
+  const firstRows = extractRows((await firstPage.getTextContent()).items);
+  const profile = detectDocumentProfile(fileName, hash, firstRows);
+
+  if (profile?.id === V2_PROFILE_ID) {
+    const bundle = await buildV2BundleFromDocument({
+      fileName,
+      hash,
+      pdfDoc,
+      pageCount,
+      storedPdfBytes,
+      profile,
+    });
+    await pdfDoc.destroy();
+    return bundle;
+  }
+
   const entries = [];
 
   for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
@@ -186,18 +242,28 @@ async function buildBundle(fileName, arrayBuffer, hash) {
     const rows = extractRows(textContent.items);
     const pageHasAtPrice = rows.some((row) => /[@＠]/.test(row.rawText));
     let activeHeader = null;
+    let pendingHeaderSegments = [];
     let sectionStartIndex = entries.length;
     let sharedFields = {};
 
     for (const row of rows) {
       const normalizedRowText = normalizeRowText(row.rawText);
-      const detectedHeader = detectHeader(row);
+      const rowHeaderSegments = collectHeaderSegments(row);
+      const detectedHeader = detectHeader(row, pendingHeaderSegments);
       if (detectedHeader) {
         activeHeader = detectedHeader;
+        pendingHeaderSegments = [];
         sectionStartIndex = entries.length;
         sharedFields = {};
         continue;
       }
+
+      if (rowHeaderSegments.length) {
+        pendingHeaderSegments = mergeHeaderSegments(pendingHeaderSegments, rowHeaderSegments);
+        continue;
+      }
+
+      pendingHeaderSegments = [];
 
       if (activeHeader) {
         if (isCategoryRowText(normalizedRowText)) {
@@ -256,6 +322,488 @@ async function buildBundle(fileName, arrayBuffer, hash) {
     })),
     pdfBytes: storedPdfBytes,
   };
+}
+
+function detectDocumentProfile(fileName, hash, firstRows) {
+  const normalizedName = String(fileName || "").toLowerCase();
+  const header = detectV2Header(firstRows);
+  if (!V2_FILE_NAME_PATTERN.test(normalizedName) || !header) {
+    return null;
+  }
+
+  return {
+    id: V2_PROFILE_ID,
+    version: V2_PROFILE_VERSION,
+    sourceFingerprint: `${V2_PROFILE_ID}:${hash}`,
+  };
+}
+
+async function buildV2BundleFromDocument({ fileName, hash, pdfDoc, pageCount, storedPdfBytes, profile }) {
+  const entries = [];
+
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    setStatus(`正在套用 202604V2 專用解析：第 ${pageNumber} / ${pageCount} 頁...`);
+    const page = await pdfDoc.getPage(pageNumber);
+    const rows = extractRows((await page.getTextContent()).items);
+    const header = detectV2Header(rows);
+
+    if (!header) {
+      continue;
+    }
+
+    const sectionState = {
+      title: "",
+      tokens: [],
+      startIndex: entries.length,
+      sharedBonus: "",
+      sharedBonusActive: false,
+      sharedNote: "",
+      sharedNoteStartIndex: null,
+      sharedNoteSignature: "",
+    };
+
+    for (const row of rows) {
+      if (row.y >= header.contentStartY) {
+        continue;
+      }
+
+      const parsed = parseV2Row(row, header, pageNumber);
+      if (!parsed) {
+        continue;
+      }
+
+      if (parsed.kind === "category") {
+        sectionState.title = parsed.title;
+        sectionState.tokens = parsed.tokens;
+        sectionState.startIndex = entries.length;
+        sectionState.sharedBonus = "";
+        sectionState.sharedBonusActive = false;
+        sectionState.sharedNote = "";
+        sectionState.sharedNoteStartIndex = null;
+        sectionState.sharedNoteSignature = "";
+        continue;
+      }
+
+      if (parsed.kind === "sharedBonus") {
+        sectionState.sharedBonusActive = true;
+        sectionState.sharedBonus = promoteV2SectionBonusToShared(
+          entries,
+          sectionState.sharedBonus,
+          pageNumber,
+          sectionState.startIndex,
+        );
+        sectionState.sharedBonus = mergeSharedBonus(sectionState.sharedBonus, parsed.value);
+        for (let index = sectionState.startIndex; index < entries.length; index += 1) {
+          if (entries[index].pageNumber === pageNumber) {
+            entries[index].bonus = sectionState.sharedBonus;
+          }
+        }
+        continue;
+      }
+
+      if (parsed.kind === "sharedNote") {
+        sectionState.sharedNote = joinV2Note(sectionState.sharedNote, parsed.value);
+        sectionState.sharedNoteStartIndex = sectionState.sharedNoteStartIndex ?? Math.max(sectionState.startIndex, entries.length - 1);
+        sectionState.sharedNoteSignature =
+          sectionState.sharedNoteSignature ||
+          getV2EntrySignature(entries[sectionState.sharedNoteStartIndex]);
+        for (let index = sectionState.sharedNoteStartIndex; index < entries.length; index += 1) {
+          if (
+            entries[index].pageNumber === pageNumber &&
+            getV2EntrySignature(entries[index]) === sectionState.sharedNoteSignature
+          ) {
+            entries[index].note = joinV2Note(entries[index].note, sectionState.sharedNote);
+          }
+        }
+        continue;
+      }
+
+      const entrySignature = getV2EntrySignature(parsed.entry);
+      const shouldApplySharedNote =
+        sectionState.sharedNote &&
+        entrySignature &&
+        entrySignature === sectionState.sharedNoteSignature;
+      const entryHasStructuredBonus = isStructuredBonusValue(parsed.entry.bonus);
+
+      if (sectionState.sharedBonusActive && entryHasStructuredBonus) {
+        sectionState.sharedBonus = mergeSharedBonus(sectionState.sharedBonus, parsed.entry.bonus);
+        parsed.entry.bonus = "";
+        for (let index = sectionState.startIndex; index < entries.length; index += 1) {
+          if (entries[index].pageNumber === pageNumber) {
+            entries[index].bonus = sectionState.sharedBonus;
+          }
+        }
+      }
+
+      const entry = {
+        ...parsed.entry,
+        bonus: parsed.entry.bonus || (sectionState.sharedBonusActive ? sectionState.sharedBonus : ""),
+        note: shouldApplySharedNote ? joinV2Note(parsed.entry.note, sectionState.sharedNote) : parsed.entry.note,
+        categoryTokens: [],
+        searchAliases: buildV2SearchAliases(parsed.entry),
+        pageNumber,
+      };
+      entries.push(entry);
+
+      if (sectionState.sharedNote && !shouldApplySharedNote) {
+        sectionState.sharedNote = "";
+        sectionState.sharedNoteStartIndex = null;
+        sectionState.sharedNoteSignature = "";
+      }
+    }
+  }
+
+  return {
+    id: ACTIVE_DOCUMENT_KEY,
+    version: BUNDLE_VERSION,
+    profileId: profile.id,
+    profileVersion: profile.version,
+    sourceFingerprint: profile.sourceFingerprint,
+    fileName,
+    hash,
+    importedAt: new Date().toISOString(),
+    pageCount,
+    entries: entries.map((entry, index) => ({
+      ...entry,
+      id: `${entry.sku || "row"}-${entry.pageNumber}-${index}`,
+      searchText: buildSearchText(entry),
+    })),
+    pdfBytes: storedPdfBytes,
+  };
+}
+
+function detectV2Header(rows) {
+  const matches = {};
+
+  for (const row of rows) {
+    const ordered = [...row.items].sort((a, b) => a.x - b.x);
+    for (let index = 0; index < ordered.length; index += 1) {
+      const item = ordered[index];
+      const next = ordered[index + 1];
+      const candidates = [
+        { text: item.text, x: item.x, y: row.y },
+      ];
+
+      if (next) {
+        candidates.push({
+          text: `${item.text}${next.text}`,
+          x: Math.min(item.x, next.x),
+          y: row.y,
+        });
+      }
+
+      for (const candidate of candidates) {
+        const key = matchV2HeaderKey(candidate.text);
+        if (!key) {
+          continue;
+        }
+
+        const existing = matches[key];
+        if (!existing || candidate.y > existing.y || (candidate.y === existing.y && candidate.x > existing.x)) {
+          matches[key] = candidate;
+        }
+      }
+    }
+  }
+
+  if (!matches.sku || !matches.retailPrice || !matches.basePrice || !matches.tierPrice || !matches.openingPrice) {
+    return null;
+  }
+
+  const ordered = [
+    matches.sku,
+    matches.retailPrice,
+    matches.bonus,
+    matches.basePrice,
+    matches.tierPrice,
+    matches.openingPrice,
+    matches.note,
+  ].filter(Boolean).map((entry) => ({
+    key: matchV2HeaderKey(entry.text),
+    x: entry.x,
+    y: entry.y,
+  })).sort((a, b) => a.x - b.x);
+
+  return {
+    contentStartY: Math.min(...Object.values(matches).map((entry) => entry.y)) - 8,
+    columns: ordered.map((entry, index) => {
+      const previous = ordered[index - 1];
+      const next = ordered[index + 1];
+      return {
+        key: entry.key,
+        x: entry.x,
+        minX: previous ? (previous.x + entry.x) / 2 : Number.NEGATIVE_INFINITY,
+        maxX: next ? (entry.x + next.x) / 2 : Number.POSITIVE_INFINITY,
+      };
+    }),
+  };
+}
+
+function matchV2HeaderKey(text) {
+  const normalized = normalizeForCompare(text);
+  for (const [key, aliases] of Object.entries(V2_HEADER_ALIASES)) {
+    for (const alias of aliases) {
+      const normalizedAlias = normalizeForCompare(alias);
+      if (normalizedAlias && normalized.includes(normalizedAlias)) {
+        return key;
+      }
+    }
+  }
+  return "";
+}
+
+function parseV2Row(row, header, pageNumber) {
+  const cells = {
+    sku: "",
+    retailPrice: "",
+    bonus: "",
+    basePrice: "",
+    tierPrice: "",
+    openingPrice: "",
+    note: "",
+  };
+
+  const ordered = [...row.items].sort((a, b) => a.x - b.x);
+  const retailColumn = header.columns.find((column) => column.key === "retailPrice");
+  const noteColumn = header.columns.find((column) => column.key === "note");
+  const rightMostPriceColumn = [...header.columns]
+    .filter((column) => ["basePrice", "tierPrice", "openingPrice"].includes(column.key))
+    .sort((a, b) => b.x - a.x)[0];
+
+  if (isV2CategoryRow(row, retailColumn?.x || 0, rightMostPriceColumn?.x || 0)) {
+    return {
+      kind: "category",
+      title: cleanCellText(row.rawText),
+      tokens: deriveV2CategoryTokens(cleanCellText(row.rawText)),
+    };
+  }
+
+  for (const item of ordered) {
+    const centerX = item.x + item.width / 2;
+    if (noteColumn && centerX >= noteColumn.minX) {
+      cells.note = joinText(cells.note, item.text);
+      continue;
+    }
+
+    const targetColumn = header.columns.find(
+      (column) => centerX >= column.minX && centerX < column.maxX,
+    );
+
+    if (!targetColumn) {
+      continue;
+    }
+
+    if (targetColumn.key === "note" || (rightMostPriceColumn && centerX > rightMostPriceColumn.x + 36)) {
+      cells.note = joinText(cells.note, item.text);
+      continue;
+    }
+
+    cells[targetColumn.key] = joinText(cells[targetColumn.key], item.text);
+  }
+
+  const hasPrice = Boolean(cells.retailPrice || cells.basePrice || cells.tierPrice || cells.openingPrice);
+  const hasSkuOrNote = Boolean(cells.sku || cells.note || cells.bonus);
+  if (!hasPrice && !hasSkuOrNote) {
+    return null;
+  }
+
+  if (!cells.sku && !cells.retailPrice && !cells.basePrice && !cells.tierPrice && !cells.openingPrice && cells.bonus) {
+    return {
+      kind: "sharedBonus",
+      value: normalizeV2Bonus(cells.bonus),
+    };
+  }
+
+  if (!cells.sku && !cells.retailPrice && !cells.basePrice && !cells.tierPrice && !cells.openingPrice && cells.note) {
+    return {
+      kind: "sharedNote",
+      value: normalizeV2Note(cells.note),
+    };
+  }
+
+  const leftData = extractV2SkuAndNote(cells.sku);
+  const openingSplit = splitMixedPriceAndNote(cells.openingPrice);
+  const baseSplit = splitMixedPriceAndNote(cells.basePrice);
+  const tierSplit = splitMixedPriceAndNote(cells.tierPrice);
+  const note = joinV2Note(
+    joinV2Note(leftData.note, cells.note),
+    joinV2Note(joinV2Note(baseSplit.note, tierSplit.note), openingSplit.note),
+  );
+
+  return {
+    kind: "entry",
+    entry: {
+      sku: leftData.sku || cleanCellText(cells.sku),
+      retailPrice: normalizePriceCell(cells.retailPrice),
+      bonus: normalizeV2Bonus(cells.bonus),
+      basePrice: baseSplit.price,
+      tierPrice: tierSplit.price,
+      openingPrice: openingSplit.price,
+      note,
+      pageNumber,
+    },
+  };
+}
+
+function isV2CategoryRow(row, retailX, rightMostPriceX) {
+  const ordered = [...row.items].sort((a, b) => a.x - b.x);
+  if (!ordered.length) {
+    return false;
+  }
+
+  const text = cleanCellText(row.rawText);
+  const allLeft = ordered.every((item) => item.x < retailX - 40);
+  const touchesPriceZone = ordered.some((item) => item.x >= retailX - 20);
+  if (!allLeft || touchesPriceZone) {
+    return false;
+  }
+
+  if (looksLikeV2ContinuationText(text)) {
+    return false;
+  }
+
+  return looksLikeV2CategoryText(text);
+}
+
+function looksLikeV2CategoryText(text) {
+  const normalized = cleanCellText(text);
+  if (!normalized) {
+    return false;
+  }
+
+  return /(全電壓|單電壓|球泡燈|投射燈泡|蠟燭燈|小夜燈|軌道投射燈|神盾筒燈|燈絲燈|羅浮宮|AR-111|E27|E14|E12|LED軌道投射燈|筒燈|燈泡)/.test(
+    normalized,
+  );
+}
+
+function looksLikeV2ContinuationText(text) {
+  const normalized = cleanCellText(text);
+  if (!normalized) {
+    return false;
+  }
+
+  return /(RA\d+|R9>|耐壓|發光角|色溫|色\b|銀\/黑|銀色|黑色|內附|調光|lm|V\b|W\/N|D\/W\/N|\/\/\/|\/\/)/i.test(
+    normalized,
+  );
+}
+
+function extractV2SkuAndNote(leftText) {
+  const normalized = String(leftText || "")
+    .replace(/／/g, "/")
+    .replace(/\s+/g, " ")
+    .trim();
+  const tokens = normalized.split(" ").filter(Boolean);
+  const skuTokens = [];
+  let index = 0;
+
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (!skuTokens.length && !isV2SkuToken(token)) {
+      break;
+    }
+    if (isV2SkuToken(token)) {
+      skuTokens.push(token);
+      index += 1;
+      continue;
+    }
+    break;
+  }
+
+  return {
+    sku: skuTokens.join("").replace(/\s+/g, ""),
+    note: normalizeV2Note(tokens.slice(index).join(" ")),
+  };
+}
+
+function isV2SkuToken(token) {
+  return /^[A-Z0-9][A-Z0-9./-]*$/i.test(String(token || ""));
+}
+
+function normalizeV2Bonus(text) {
+  return cleanCellText(text).replace(/\s+/g, "");
+}
+
+function promoteV2SectionBonusToShared(entries, existingSharedBonus, pageNumber, sectionStartIndex) {
+  let nextSharedBonus = existingSharedBonus;
+
+  for (let index = sectionStartIndex; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (entry.pageNumber !== pageNumber || !isStructuredBonusValue(entry.bonus)) {
+      continue;
+    }
+
+    nextSharedBonus = mergeSharedBonus(nextSharedBonus, entry.bonus);
+    entry.bonus = "";
+  }
+
+  return nextSharedBonus;
+}
+
+function normalizeV2Note(text) {
+  return cleanCellText(text)
+    .replace(/\s*\/\s*/g, " / ")
+    .replace(/°\s+角/g, "°角")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function joinV2Note(left, right) {
+  const parts = [normalizeV2Note(left), normalizeV2Note(right)].filter(Boolean);
+  return [...new Set(parts)].join(" ").trim();
+}
+
+function deriveV2CategoryTokens(sectionTitle) {
+  const upper = String(sectionTitle || "").toUpperCase();
+  const tokens = new Set();
+
+  for (const match of upper.matchAll(/[A-Z]{2,}[0-9-]*/g)) {
+    tokens.add(match[0]);
+    tokens.add(match[0].replace(/[^A-Z0-9]/g, ""));
+  }
+
+  return [...tokens].filter(Boolean);
+}
+
+function buildV2SearchAliases(entry) {
+  const aliases = new Set();
+  const sku = String(entry.sku || "");
+  const compactSku = sku.replace(/[^A-Z0-9]/gi, "");
+  const note = normalizeV2Note(entry.note);
+
+  if (sku) {
+    aliases.add(sku);
+    aliases.add(compactSku);
+    const withoutLead = compactSku.replace(/^(LED|D)/i, "");
+    if (withoutLead) {
+      aliases.add(withoutLead);
+      const alphaPrefix = (withoutLead.match(/^[A-Z]+/) || [""])[0];
+      for (let length = 2; length <= Math.min(6, alphaPrefix.length); length += 1) {
+        aliases.add(alphaPrefix.slice(0, length));
+      }
+    }
+  }
+
+  if (note) {
+    aliases.add(note);
+    aliases.add(note.replace(/\s+/g, ""));
+  }
+
+  return [...aliases].filter(Boolean);
+}
+
+function getV2EntrySignature(entry) {
+  if (!entry) {
+    return "";
+  }
+
+  return [
+    entry.retailPrice,
+    entry.basePrice,
+    entry.tierPrice,
+    entry.openingPrice,
+  ]
+    .filter(Boolean)
+    .join("|");
 }
 
 function parseRowRecord(rawText, pageNumber) {
@@ -347,7 +895,7 @@ function extractPriceTokens(text) {
 function normalizeMappedEntry(entry) {
   const skuAndNote = extractSkuAndNote(entry.sku || "");
   const trailingNote = skuAndNote.note || "";
-  const explicitNote = cleanCellText(entry.note);
+  let explicitNote = cleanCellText(entry.note);
   const normalizedAtPrice = normalizePriceCell(entry.atPrice);
   const normalizedRetailPrice = normalizePriceCell(entry.retailPrice);
   let normalizedBonus = cleanCellText(entry.bonus);
@@ -369,13 +917,21 @@ function normalizeMappedEntry(entry) {
     normalizedBonus = "";
   }
 
+  const splitBase = splitMixedPriceAndNote(entry.basePrice);
+  const splitTier = splitMixedPriceAndNote(entry.tierPrice);
+  const splitOpening = splitMixedPriceAndNote(entry.openingPrice);
+  explicitNote = [explicitNote, splitBase.note, splitTier.note, splitOpening.note]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
   return {
     ...entry,
     sku: skuAndNote.sku || cleanCellText(entry.sku),
     retailPrice: repairedRetailPrice,
-    basePrice: normalizePriceCell(entry.basePrice),
-    tierPrice: normalizePriceCell(entry.tierPrice),
-    openingPrice: normalizePriceCell(entry.openingPrice),
+    basePrice: splitBase.price,
+    tierPrice: splitTier.price,
+    openingPrice: splitOpening.price,
     bonus: normalizedBonus,
     note: [trailingNote, explicitNote].filter(Boolean).join(" ").trim(),
   };
@@ -386,6 +942,37 @@ function normalizePriceCell(value) {
     .replace(/\$/g, "")
     .replace(/\s+/g, "")
     .trim();
+}
+
+function splitMixedPriceAndNote(value) {
+  const raw = cleanCellText(value);
+  if (!raw) {
+    return {
+      price: "",
+      note: "",
+    };
+  }
+
+  const normalized = normalizePriceCell(raw);
+  if (looksLikePlainPrice(normalized) || normalized === "-") {
+    return {
+      price: normalized,
+      note: "",
+    };
+  }
+
+  const match = raw.match(/^\$?\s*(-|\d[\d,]*)(.*)$/);
+  if (!match) {
+    return {
+      price: normalized,
+      note: "",
+    };
+  }
+
+  return {
+    price: normalizePriceCell(match[1]),
+    note: cleanCellText(match[2]),
+  };
 }
 
 function looksLikePlainPrice(value) {
@@ -563,6 +1150,41 @@ function promoteSectionBonusToShared(entries, sharedFields, pageNumber, sectionS
 }
 
 function extractSkuAndNote(prefix) {
+  const normalizedSafe = String(prefix || "")
+    .replace(/／/g, "/")
+    .replace(/\s+/g, " ")
+    .trim();
+  const safeTokens = normalizedSafe.split(" ").filter(Boolean);
+  const safeSkuTokens = [];
+  let safeIndex = 0;
+
+  while (safeIndex < safeTokens.length) {
+    const token = safeTokens[safeIndex];
+    if (!safeSkuTokens.length && !isCodeToken(token)) {
+      break;
+    }
+    if (isCodeToken(token) || isSkuSuffixToken(token)) {
+      safeSkuTokens.push(token);
+      safeIndex += 1;
+      continue;
+    }
+    break;
+  }
+
+  if (safeSkuTokens.length) {
+    return {
+      sku: safeSkuTokens.reduce((result, token) => {
+        if (!result) {
+          return token;
+        }
+        if (isSkuSuffixToken(token)) {
+          return `${result} ${token}`;
+        }
+        return `${result}${token}`;
+      }, ""),
+      note: safeTokens.slice(safeIndex).join(" ").trim(),
+    };
+  }
   const normalized = prefix
     .replace(/／/g, "/")
     .replace(/[（]/g, "(")
@@ -753,7 +1375,7 @@ function mergeSegments(items, gapThreshold) {
   return segments;
 }
 
-function detectHeader(row) {
+function collectHeaderSegments(row) {
   const headerSegments = [];
 
   for (let index = 0; index < row.items.length; index += 1) {
@@ -788,8 +1410,12 @@ function detectHeader(row) {
     }
   }
 
+  return headerSegments;
+}
+
+function mergeHeaderSegments(existingSegments, incomingSegments) {
   const unique = [];
-  for (const segment of headerSegments) {
+  for (const segment of [...existingSegments, ...incomingSegments]) {
     const existing = unique.find((entry) => entry.key === segment.key);
     if (!existing) {
       unique.push(segment);
@@ -799,6 +1425,12 @@ function detectHeader(row) {
       Object.assign(existing, segment);
     }
   }
+
+  return unique;
+}
+
+function detectHeader(row, previousSegments = []) {
+  const unique = mergeHeaderSegments(previousSegments, collectHeaderSegments(row));
 
   const hasSku = unique.some((segment) => segment.key === "sku");
   const hasBase = unique.some((segment) => segment.key === "basePrice");
@@ -827,6 +1459,34 @@ function detectHeader(row) {
 function findBestHeaderMatch(normalizedText) {
   let bestMatch = null;
   for (const column of [...COLUMN_DEFS, ...OPTIONAL_PARSE_COLUMNS]) {
+    const explicitAliases = [
+      ...(CANONICAL_HEADER_ALIASES[column.key] || []),
+      ...(EXPLICIT_HEADER_ALIASES[column.key] || []),
+    ];
+    for (const alias of explicitAliases) {
+      const normalizedAlias = normalizeForCompare(alias);
+      if (!normalizedAlias || !normalizedText.includes(normalizedAlias)) {
+        continue;
+      }
+
+      let score = 4;
+      if (normalizedText === normalizedAlias) {
+        score = 6;
+      } else if (
+        normalizedText.startsWith(normalizedAlias) ||
+        normalizedText.endsWith(normalizedAlias)
+      ) {
+        score = 5;
+      }
+
+      if (!bestMatch || score > bestMatch.score) {
+        bestMatch = {
+          column,
+          score,
+        };
+      }
+    }
+
     for (const alias of column.aliases) {
       const normalizedAlias = normalizeForCompare(alias);
       if (!normalizedAlias || !normalizedText.includes(normalizedAlias)) {
@@ -856,9 +1516,22 @@ function findBestHeaderMatch(normalizedText) {
 
 function mapRowToEntry(row, header, pageNumber) {
   const cells = Object.fromEntries(COLUMN_DEFS.map((column) => [column.key, ""]));
+  const noteColumn = header.columns.find((column) => column.key === "note");
+  const rightMostPriceColumn = [...header.columns]
+    .filter((column) => ["basePrice", "tierPrice", "openingPrice"].includes(column.key))
+    .sort((a, b) => b.x - a.x)[0];
 
   for (const item of row.items) {
     const centerX = item.x + item.width / 2;
+    if (
+      rightMostPriceColumn &&
+      centerX > rightMostPriceColumn.x + 40
+    ) {
+      const noteKey = noteColumn ? "note" : "note";
+      cells[noteKey] = joinText(cells[noteKey], item.text);
+      continue;
+    }
+
     const column = header.columns.reduce((closest, entry) => {
       if (!closest) {
         return entry;
@@ -888,12 +1561,18 @@ function mapRowToEntry(row, header, pageNumber) {
   };
 }
 
+function containsNoteLikeText(text) {
+  const value = String(text || "").trim();
+  return /[\u4e00-\u9fff°]/.test(value);
+}
+
 function isNoiseRow(row, cells) {
   const rowText = normalizeForCompare(row.rawText);
   const hasAnyField = Object.values(cells).some(Boolean);
   const priceCount = ["retailPrice", "basePrice", "tierPrice", "openingPrice"].filter(
     (key) => cells[key],
   ).length;
+  const hasStructuredData = Boolean(cells.sku || cells.retailPrice || cells.bonus || priceCount > 0);
 
   if (!hasAnyField) {
     return true;
@@ -913,6 +1592,10 @@ function isNoiseRow(row, cells) {
       normalizeForCompare(cells[column.key]).includes(normalizeForCompare(column.label)),
     )
   ) {
+    return true;
+  }
+
+  if (!hasStructuredData && cells.note) {
     return true;
   }
 
@@ -1028,10 +1711,29 @@ function applySearch(term) {
   const normalized = normalizeForCompare(term);
   state.filteredEntries = !normalized
     ? state.entries
-    : state.entries.filter((entry) => entry.searchText.includes(normalized));
+    : state.entries.filter((entry) => entryMatchesSearch(entry, normalized));
 
   renderResults();
   updateDockState();
+}
+
+function entryMatchesSearch(entry, normalized) {
+  if (!normalized) {
+    return true;
+  }
+
+  if (normalized.length <= 3) {
+    const aliases = [
+      entry.sku,
+      ...(entry.searchAliases || []),
+    ]
+      .map((value) => normalizeForCompare(value))
+      .filter(Boolean);
+
+    return aliases.some((alias) => alias === normalized || alias.startsWith(normalized));
+  }
+
+  return (entry.searchText || "").includes(normalized);
 }
 
 function renderShell() {
@@ -1254,7 +1956,7 @@ async function copyField(entry, key) {
     return;
   }
 
-  const label = COLUMN_DEFS.find((column) => column.key === key)?.label || key;
+  const label = getCopyLabel(key);
   const text = `型號 ${entry.sku} ${label} ${value}`;
   try {
     await copyToClipboard(text);
@@ -1273,7 +1975,7 @@ function openDetail(entry) {
   refs.detailTitle.textContent = entry.sku || "未識別型號";
   refs.detailGrid.innerHTML = COLUMN_DEFS.map((column) => renderDetailItem(column, entry)).join("");
   refs.copyActions.innerHTML = COPYABLE_PRICE_KEYS.map((key) => {
-    const label = COLUMN_DEFS.find((column) => column.key === key)?.label || key;
+    const label = getCopyLabel(key);
     const value = entry[key] || "-";
     const disabled = entry[key] ? "" : "disabled";
     return `
@@ -1313,6 +2015,10 @@ function renderDetailItem(column, entry) {
       <span class="detail-item-value">${escapeHtml(entry[column.key] || "-")}</span>
     </div>
   `;
+}
+
+function getCopyLabel(key) {
+  return COPY_LABELS[key] || COLUMN_DEFS.find((column) => column.key === key)?.label || key;
 }
 
 function closeDetail(options = {}) {
@@ -1618,6 +2324,7 @@ function buildSearchText(entry) {
   return normalizeForCompare(
     [
       entry.sku,
+      ...(entry.searchAliases || []),
       entry.retailPrice,
       entry.bonus,
       entry.basePrice,
@@ -1649,11 +2356,18 @@ function joinText(left, right) {
   }
   const lastChar = left.slice(-1);
   const firstChar = right.slice(0, 1);
-  const needsSpace = /[A-Za-z0-9]$/.test(lastChar) && /^[A-Za-z0-9]/.test(firstChar);
+  const needsSpace =
+    (/[A-Za-z0-9\])"]$/.test(lastChar) && (/^[A-Za-z0-9\[(（"]/.test(firstChar) || /[\u4e00-\u9fff]/.test(firstChar))) ||
+    (/[\u4e00-\u9fff]$/.test(lastChar) && /^[A-Za-z0-9]/.test(firstChar));
   return `${left}${needsSpace ? " " : ""}${right}`;
 }
 
 function normalizeForCompare(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[;,.\\|()[\]{}_\-\/／"']/g, "");
+
   return String(text || "")
     .toLowerCase()
     .replace(/\s+/g, "")

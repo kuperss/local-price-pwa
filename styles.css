@@ -29,6 +29,8 @@ html,
 body {
   margin: 0;
   min-height: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
   background:
     radial-gradient(circle at top left, rgba(201, 109, 59, 0.18), transparent 28%),
     radial-gradient(circle at top right, rgba(23, 66, 60, 0.18), transparent 24%),
@@ -59,8 +61,11 @@ button {
 }
 
 .app-shell {
+  width: 100%;
+  max-width: 100%;
   max-width: 1100px;
   margin: 0 auto;
+  overflow-x: clip;
 }
 
 .app-bar,
@@ -232,13 +237,27 @@ button {
 
 .main-layout {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+  min-width: 0;
+}
+
+.main-layout > * {
+  min-width: 0;
 }
 
 .control-panel,
 .results-panel {
+  width: 100%;
+  max-width: 100%;
   border-radius: var(--radius-xl);
   padding: 18px;
+  overflow-x: clip;
+}
+
+.control-panel > *,
+.results-panel > * {
+  min-width: 0;
 }
 
 .panel-head,
@@ -252,11 +271,22 @@ button {
   justify-content: space-between;
 }
 
+.panel-head > *,
+.results-head > *,
+.history-head > *,
+.preview-head > *,
+.detail-head > * {
+  min-width: 0;
+}
+
 .panel-head h2,
 .results-head h2,
 .detail-head h2 {
   margin: 6px 0 0;
   font-size: 1.25rem;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  white-space: normal;
 }
 
 .panel-actions,
@@ -265,6 +295,7 @@ button {
   gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  min-width: 0;
 }
 
 .primary-button,
@@ -326,6 +357,7 @@ button {
 
 .search-shell {
   margin-top: 18px;
+  min-width: 0;
 }
 
 .search-label {
@@ -337,10 +369,13 @@ button {
 .search-row {
   display: flex;
   gap: 10px;
+  min-width: 0;
 }
 
 .search-row input {
-  flex: 1;
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
   min-height: 52px;
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -356,11 +391,17 @@ button {
 }
 
 .search-button {
+  width: auto;
+  max-width: none;
+  flex: 0 0 92px;
   min-width: 92px;
 }
 
 .history-block {
   margin-top: 18px;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .history-list {
@@ -385,6 +426,12 @@ button {
   background: linear-gradient(135deg, rgba(23, 66, 60, 0.08), rgba(23, 66, 60, 0.04));
   border: 1px solid rgba(23, 66, 60, 0.12);
   line-height: 1.5;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  white-space: normal;
 }
 
 .results-head {
@@ -737,6 +784,10 @@ body.detail-open .mobile-dock {
 }
 
 @media (max-width: 700px) {
+  .main-layout {
+    display: block;
+  }
+
   body {
     padding: calc(8px + var(--safe-top)) 10px calc(88px + var(--safe-bottom));
   }
@@ -759,6 +810,8 @@ body.detail-open .mobile-dock {
 
   .control-panel,
   .results-panel {
+    width: 100%;
+    max-width: 100%;
     padding: 14px;
     border-radius: 26px;
   }
@@ -771,6 +824,7 @@ body.detail-open .mobile-dock {
   }
 
   .results-panel {
+    margin-top: 12px;
     background: rgba(255, 251, 245, 0.88);
   }
 
@@ -802,6 +856,15 @@ body.detail-open .mobile-dock {
     gap: 10px;
   }
 
+  .panel-head > div,
+  .results-head > div,
+  .history-head > div,
+  .preview-head > div,
+  .detail-head > div {
+    width: 100%;
+    max-width: 100%;
+  }
+
   .panel-actions,
   .preview-actions {
     width: 100%;
@@ -810,7 +873,7 @@ body.detail-open .mobile-dock {
 
   .panel-actions {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: 10px;
   }
 
@@ -823,11 +886,13 @@ body.detail-open .mobile-dock {
   .panel-actions > button,
   .preview-actions > button {
     width: 100%;
+    max-width: 100%;
+    min-width: 0;
     min-height: 46px;
   }
 
   .panel-actions > button:nth-child(3) {
-    grid-column: 1 / -1;
+    grid-column: auto;
   }
 
   .search-shell {
@@ -842,9 +907,13 @@ body.detail-open .mobile-dock {
   .search-row {
     flex-direction: column;
     gap: 8px;
+    width: 100%;
+    max-width: 100%;
   }
 
   .search-row input {
+    width: 100%;
+    max-width: 100%;
     min-height: 56px;
     font-size: 1rem;
     border-radius: 20px;
@@ -852,6 +921,7 @@ body.detail-open .mobile-dock {
 
   .search-button {
     width: 100%;
+    max-width: 100%;
     min-height: 52px;
     border-radius: 20px;
   }
