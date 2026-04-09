@@ -2,7 +2,7 @@ import * as pdfjsLib from "./vendor/pdfjs/pdf.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
 
-const APP_VERSION = "45";
+const APP_VERSION = "46";
 
 const DB_NAME = "local-price-pwa";
 const DB_VERSION = 1;
@@ -13,7 +13,13 @@ const SEARCH_HISTORY_LIMIT = 6;
 const MAX_RESULTS_RENDER = 250;
 const ROW_TOLERANCE = 3;
 const HEADER_SEGMENT_GAP = 22;
-const BUNDLE_VERSION = 27;
+const BUNDLE_VERSION = 28;
+const PRODUCT_NAME_FILE = "./name.xlsx";
+const PRODUCT_NAME_LIBRARY_SRC = "./vendor/xlsx/xlsx.full.min.js";
+const PRODUCT_NAME_HEADER_ALIASES = {
+  sku: ["型號", "品編"],
+  productName: ["品名", "中文品名", "中文名稱", "名稱"],
+};
 const V2_PROFILE_ID = "price-sheet-202604-v2";
 const V2_PROFILE_VERSION = 1;
 const V2_FILE_NAME_PATTERN = /202604\)?v2/i;
@@ -112,6 +118,7 @@ const refs = {
   detailHandle: document.querySelector("#detail-handle"),
   detailClose: document.querySelector("#detail-close"),
   detailTitle: document.querySelector("#detail-title"),
+  detailSubtitle: document.querySelector("#detail-subtitle"),
   detailGrid: document.querySelector("#detail-grid"),
   copyActions: document.querySelector("#copy-actions"),
   previewLabel: document.querySelector("#preview-label"),
@@ -132,6 +139,8 @@ const detailSheetDrag = {
 };
 
 let detailCloseTimer = null;
+let xlsxLibraryPromise = null;
+let productNameResourcePromise = null;
 
 init().catch((error) => {
   console.error(error);
@@ -186,8 +195,10 @@ async function onFileSelected(event) {
     setStatus(`正在讀取 ${file.name}...`);
     const arrayBuffer = await file.arrayBuffer();
     const hash = await hashBuffer(arrayBuffer);
+    const productNameResource = await getProductNameResource();
+    const hasLatestNameMap = (state.bundle?.nameMapHash || "") === (productNameResource.hash || "");
 
-    if (state.bundle?.hash === hash && state.bundle?.version === BUNDLE_VERSION) {
+    if (state.bundle?.hash === hash && state.bundle?.version === BUNDLE_VERSION && hasLatestNameMap) {
       setStatus("這份 PDF 已存在本機，已直接載入。");
       showToast("這份價格表已經在本機。");
       refs.fileInput.value = "";
@@ -198,8 +209,8 @@ async function onFileSelected(event) {
     const bundle = await buildBundle(file.name, arrayBuffer, hash);
     await setValue(ACTIVE_DOCUMENT_KEY, bundle);
     await activateBundle(bundle);
-    setStatus(`已更新價格表：${bundle.fileName}`);
-    showToast("新版價格表已覆蓋舊版。");
+    setStatus(getImportedBundleStatus(bundle));
+    showToast(getImportedBundleToast(bundle));
   } catch (error) {
     console.error("PDF import failed", error);
     const detail = error instanceof Error ? ` ${error.message}` : "";
@@ -214,6 +225,7 @@ async function buildBundle(fileName, arrayBuffer, hash) {
   const sourceBytes = new Uint8Array(ensureArrayBuffer(arrayBuffer));
   const storedPdfBytes = sourceBytes.slice().buffer;
   const parserPdfBytes = sourceBytes.slice();
+  const currentProductNameResourcePromise = getProductNameResource();
   const pdfDoc = await pdfjsLib.getDocument({ data: parserPdfBytes }).promise;
   const pageCount = pdfDoc.numPages;
   const firstPage = await pdfDoc.getPage(1);
@@ -307,21 +319,15 @@ async function buildBundle(fileName, arrayBuffer, hash) {
   }
 
   await pdfDoc.destroy();
-
-  return {
-    id: ACTIVE_DOCUMENT_KEY,
-    version: BUNDLE_VERSION,
+  const productNameResource = await currentProductNameResourcePromise;
+  return createBundle({
     fileName,
     hash,
-    importedAt: new Date().toISOString(),
     pageCount,
-    entries: entries.map((entry, index) => ({
-      ...entry,
-      id: `${entry.sku || "row"}-${entry.pageNumber}-${index}`,
-      searchText: buildSearchText(entry),
-    })),
-    pdfBytes: storedPdfBytes,
-  };
+    entries,
+    storedPdfBytes,
+    productNameResource,
+  });
 }
 
 function detectDocumentProfile(fileName, hash, firstRows) {
@@ -339,6 +345,7 @@ function detectDocumentProfile(fileName, hash, firstRows) {
 }
 
 async function buildV2BundleFromDocument({ fileName, hash, pdfDoc, pageCount, storedPdfBytes, profile }) {
+  const currentProductNameResourcePromise = getProductNameResource();
   const entries = [];
   let lastKnownHeader = null;
 
@@ -466,23 +473,57 @@ async function buildV2BundleFromDocument({ fileName, hash, pdfDoc, pageCount, st
     console.log(`[V2解析] 第 ${pageNumber}/${pageCount} 頁：header=${headerSource}，本頁加入 ${entries.length - entriesBefore} 筆，累計 ${entries.length} 筆`);
   }
   console.log(`[V2解析] 解析完成，共 ${entries.length} 筆`);
+  const productNameResource = await currentProductNameResourcePromise;
+  return createBundle({
+    fileName,
+    hash,
+    pageCount,
+    entries,
+    storedPdfBytes,
+    profile,
+    productNameResource,
+  });
+}
 
-  return {
+function createBundle({ fileName, hash, pageCount, entries, storedPdfBytes, profile = null, productNameResource }) {
+  const bundle = {
     id: ACTIVE_DOCUMENT_KEY,
     version: BUNDLE_VERSION,
-    profileId: profile.id,
-    profileVersion: profile.version,
-    sourceFingerprint: profile.sourceFingerprint,
     fileName,
     hash,
     importedAt: new Date().toISOString(),
     pageCount,
-    entries: entries.map((entry, index) => ({
-      ...entry,
-      id: `${entry.sku || "row"}-${entry.pageNumber}-${index}`,
-      searchText: buildSearchText(entry),
-    })),
+    nameMapHash: productNameResource?.hash || "",
+    entries: finalizeBundleEntries(entries, productNameResource),
     pdfBytes: storedPdfBytes,
+  };
+
+  if (profile) {
+    bundle.profileId = profile.id;
+    bundle.profileVersion = profile.version;
+    bundle.sourceFingerprint = profile.sourceFingerprint;
+  }
+
+  return bundle;
+}
+
+function finalizeBundleEntries(entries, productNameResource) {
+  return entries.map((entry, index) => finalizeBundleEntry(entry, index, productNameResource));
+}
+
+function finalizeBundleEntry(entry, index, productNameResource) {
+  const productName = lookupProductName(entry.sku, productNameResource) || entry.productName || "";
+  const searchAliases = mergeSearchAliases(entry.searchAliases, productName);
+  const finalizedEntry = {
+    ...entry,
+    productName,
+    searchAliases,
+  };
+
+  return {
+    ...finalizedEntry,
+    id: `${finalizedEntry.sku || "row"}-${finalizedEntry.pageNumber}-${index}`,
+    searchText: buildSearchText(finalizedEntry),
   };
 }
 
@@ -1672,7 +1713,7 @@ async function loadCachedBundle() {
     }
 
     const bundle = await upgradeBundleIfNeeded(cached);
-    setStatus(`已自動載入本機價格表：${bundle.fileName}`);
+    setStatus(getLoadedBundleStatus(bundle));
     await activateBundle(bundle);
   } catch (error) {
     console.error("Failed to load cached bundle", error);
@@ -1682,11 +1723,18 @@ async function loadCachedBundle() {
 }
 
 async function upgradeBundleIfNeeded(bundle) {
-  if (bundle?.version === BUNDLE_VERSION) {
+  const productNameResource = await getProductNameResource();
+  const currentNameMapHash = productNameResource.hash || "";
+  if (bundle?.version === BUNDLE_VERSION && (bundle?.nameMapHash || "") === currentNameMapHash) {
     return bundle;
   }
 
-  setStatus("正在更新本機索引版本，請稍候...");
+  const shouldRebuildForNameMap = (bundle?.nameMapHash || "") !== currentNameMapHash;
+  setStatus(
+    shouldRebuildForNameMap
+      ? "偵測到型號中文對照表已更新，正在重建本機索引..."
+      : "正在更新本機索引版本，請稍候...",
+  );
   const rebuilt = await buildBundle(
     bundle.fileName || "已保存價格表.pdf",
     ensureArrayBuffer(bundle.pdfBytes),
@@ -1844,7 +1892,7 @@ function renderHistory() {
 function renderResults() {
   if (!state.bundle) {
     refs.resultsTitle.textContent = "等待匯入價格表";
-    refs.resultsSubtitle.textContent = "匯入後會在本機建立索引，下次開啟會自動讀取。";
+    refs.resultsSubtitle.textContent = "匯入後會在本機建立索引，支援型號、中文品名與備註搜尋。";
     refs.emptyState.classList.remove("hidden");
     refs.emptyState.querySelector(".empty-title").textContent = "先載入你的 PDF 價格表";
     refs.emptyState.querySelector(".empty-text").textContent =
@@ -1864,13 +1912,13 @@ function renderResults() {
   refs.resultsSubtitle.textContent =
     total > MAX_RESULTS_RENDER
       ? `為了讓手機操作更順，先顯示前 ${MAX_RESULTS_RENDER} 筆結果。`
-      : "點卡片查看細節，或直接點價格快速複製。";
+      : "可用型號、中文品名、價格或備註搜尋，點卡片查看細節或直接點價格快速複製。";
 
   if (!rendered.length) {
     refs.emptyState.classList.remove("hidden");
     refs.emptyState.querySelector(".empty-title").textContent = "查無符合結果";
     refs.emptyState.querySelector(".empty-text").textContent =
-      "可以換關鍵字試試，或直接用型號、底價、開盤價、補充資訊內文字搜尋。";
+      "可以換關鍵字試試，或直接用型號、中文品名、底價、開盤價、補充資訊內文字搜尋。";
     refs.resultsList.innerHTML = "";
     updateDockState();
     return;
@@ -1888,6 +1936,7 @@ function renderCard(entry) {
         <div>
           <p class="section-label">型號</p>
           <p class="result-code">${escapeHtml(entry.sku || "未識別")}</p>
+          ${entry.productName ? `<p class="result-name">${escapeHtml(entry.productName)}</p>` : ""}
         </div>
         <span class="page-pill">第 ${entry.pageNumber} 頁</span>
       </div>
@@ -1973,7 +2022,15 @@ async function copyField(entry, key) {
   }
 
   const label = getCopyLabel(key);
-  const text = `型號 ${entry.sku} ${label} ${value}`;
+  const text = [
+    entry.sku,
+    entry.productName,
+    label,
+    value,
+  ]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(" ");
   try {
     await copyToClipboard(text);
     showToast(`已複製：${text}`);
@@ -1989,6 +2046,10 @@ function openDetail(entry) {
   state.previewPage = entry.pageNumber;
 
   refs.detailTitle.textContent = entry.sku || "未識別型號";
+  if (refs.detailSubtitle) {
+    refs.detailSubtitle.textContent = entry.productName || "";
+    refs.detailSubtitle.classList.toggle("hidden", !entry.productName);
+  }
   refs.detailGrid.innerHTML = COLUMN_DEFS.map((column) => renderDetailItem(column, entry)).join("");
   refs.copyActions.innerHTML = COPYABLE_PRICE_KEYS.map((key) => {
     const label = getCopyLabel(key);
@@ -2308,6 +2369,205 @@ async function registerServiceWorker() {
   }
 }
 
+async function loadXlsxLibrary() {
+  if (window.XLSX) {
+    return window.XLSX;
+  }
+
+  if (xlsxLibraryPromise) {
+    return xlsxLibraryPromise;
+  }
+
+  xlsxLibraryPromise = new Promise((resolve, reject) => {
+    const existingScript = document.querySelector(`script[data-xlsx-src="${PRODUCT_NAME_LIBRARY_SRC}"]`);
+    if (existingScript) {
+      existingScript.addEventListener("load", () => resolve(window.XLSX), { once: true });
+      existingScript.addEventListener("error", () => reject(new Error("XLSX library failed to load.")), { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = `${PRODUCT_NAME_LIBRARY_SRC}?v=${APP_VERSION}`;
+    script.async = true;
+    script.dataset.xlsxSrc = PRODUCT_NAME_LIBRARY_SRC;
+    script.onload = () => {
+      if (window.XLSX) {
+        resolve(window.XLSX);
+        return;
+      }
+      reject(new Error("XLSX library loaded without exposing window.XLSX."));
+    };
+    script.onerror = () => reject(new Error("Failed to load xlsx.full.min.js."));
+    document.head.append(script);
+  }).catch((error) => {
+    xlsxLibraryPromise = null;
+    throw error;
+  });
+
+  return xlsxLibraryPromise;
+}
+
+async function getProductNameResource() {
+  if (productNameResourcePromise) {
+    return productNameResourcePromise;
+  }
+
+  productNameResourcePromise = loadProductNameResource().catch((error) => {
+    console.warn("Failed to load name.xlsx; product name aliases will be skipped.", error);
+    productNameResourcePromise = null;
+    return createEmptyProductNameResource();
+  });
+
+  return productNameResourcePromise;
+}
+
+function createEmptyProductNameResource() {
+  return {
+    hash: "",
+    exactMap: new Map(),
+    normalizedMap: new Map(),
+  };
+}
+
+async function loadProductNameResource() {
+  const [XLSX, response] = await Promise.all([
+    loadXlsxLibrary(),
+    fetch(PRODUCT_NAME_FILE, { cache: "no-store" }),
+  ]);
+
+  if (!response.ok) {
+    throw new Error(`name.xlsx request failed with HTTP ${response.status}.`);
+  }
+
+  const workbookBytes = await response.arrayBuffer();
+  const hash = await hashBuffer(workbookBytes);
+  const workbook = XLSX.read(workbookBytes, { type: "array" });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) {
+    throw new Error("name.xlsx does not contain any worksheet.");
+  }
+
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheetName], {
+    header: 1,
+    defval: "",
+    raw: false,
+    blankrows: false,
+  });
+  const { exactMap, normalizedMap } = buildProductNameLookup(rows);
+
+  return {
+    hash,
+    exactMap,
+    normalizedMap,
+  };
+}
+
+function buildProductNameLookup(rows) {
+  const workbookRows = Array.isArray(rows) ? rows : [];
+  const headerRowIndex = workbookRows.findIndex(
+    (row) => Array.isArray(row) && row.some((cell) => String(cell || "").trim()),
+  );
+  if (headerRowIndex < 0) {
+    throw new Error("name.xlsx does not contain a header row.");
+  }
+
+  const headerRow = workbookRows[headerRowIndex].map((cell) => String(cell || "").trim());
+  const skuIndex = findWorksheetColumnIndex(headerRow, PRODUCT_NAME_HEADER_ALIASES.sku);
+  const productNameIndex = findWorksheetColumnIndex(headerRow, PRODUCT_NAME_HEADER_ALIASES.productName);
+  if (skuIndex < 0 || productNameIndex < 0) {
+    throw new Error("name.xlsx must contain 型號 and 品名 columns.");
+  }
+
+  const exactMap = new Map();
+  const normalizedMap = new Map();
+
+  for (const row of workbookRows.slice(headerRowIndex + 1)) {
+    if (!Array.isArray(row)) {
+      continue;
+    }
+
+    const sku = String(row[skuIndex] || "").trim();
+    const productName = String(row[productNameIndex] || "").trim();
+    if (!sku || !productName) {
+      continue;
+    }
+
+    storeProductNameMapping(exactMap, sku, productName, sku);
+    const normalizedSku = normalizeSkuLookupKey(sku);
+    if (normalizedSku) {
+      storeProductNameMapping(normalizedMap, normalizedSku, productName, sku);
+    }
+  }
+
+  return {
+    exactMap,
+    normalizedMap,
+  };
+}
+
+function findWorksheetColumnIndex(headerRow, aliases) {
+  const normalizedAliases = aliases.map((alias) => normalizeForCompare(alias));
+  return headerRow.findIndex((cell) => normalizedAliases.includes(normalizeForCompare(cell)));
+}
+
+function storeProductNameMapping(map, key, productName, sourceSku) {
+  const existing = map.get(key);
+  if (!existing) {
+    map.set(key, productName);
+    return;
+  }
+
+  if (!productName || existing === productName) {
+    return;
+  }
+
+  console.warn(
+    `[name.xlsx] Duplicate mapping detected for ${sourceSku}: keeping "${existing}" instead of "${productName}".`,
+  );
+}
+
+function lookupProductName(sku, productNameResource) {
+  const exactSku = String(sku || "").trim();
+  if (!exactSku || !productNameResource) {
+    return "";
+  }
+
+  if (productNameResource.exactMap?.has(exactSku)) {
+    return productNameResource.exactMap.get(exactSku) || "";
+  }
+
+  const normalizedSku = normalizeSkuLookupKey(exactSku);
+  if (!normalizedSku) {
+    return "";
+  }
+
+  return productNameResource.normalizedMap?.get(normalizedSku) || "";
+}
+
+function normalizeSkuLookupKey(value) {
+  return String(value || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+}
+
+function getImportedBundleStatus(bundle) {
+  return bundle.nameMapHash
+    ? `已匯入價格表：${bundle.fileName}`
+    : `已匯入價格表：${bundle.fileName}（未載入中文品名對照）`;
+}
+
+function getLoadedBundleStatus(bundle) {
+  return bundle.nameMapHash
+    ? `已自動載入本機價格表：${bundle.fileName}`
+    : `已自動載入本機價格表：${bundle.fileName}（未載入中文品名對照）`;
+}
+
+function getImportedBundleToast(bundle) {
+  return bundle.nameMapHash
+    ? "價格表與中文品名索引已匯入完成。"
+    : "價格表已匯入，但無法讀取 name.xlsx，已略過中文品名對應。";
+}
+
 function setStatus(text) {
   refs.statusBanner.textContent = text;
 }
@@ -2340,6 +2600,7 @@ function buildSearchText(entry) {
   return normalizeForCompare(
     [
       entry.sku,
+      entry.productName,
       ...(entry.searchAliases || []),
       entry.retailPrice,
       entry.bonus,
@@ -2351,6 +2612,31 @@ function buildSearchText(entry) {
       .filter(Boolean)
       .join(" "),
   );
+}
+
+function mergeSearchAliases(...groups) {
+  const aliases = [];
+  const seen = new Set();
+
+  for (const group of groups) {
+    const values = Array.isArray(group) ? group : [group];
+    for (const value of values) {
+      const text = String(value || "").trim();
+      if (!text) {
+        continue;
+      }
+
+      const normalized = normalizeForCompare(text);
+      if (!normalized || seen.has(normalized)) {
+        continue;
+      }
+
+      seen.add(normalized);
+      aliases.push(text);
+    }
+  }
+
+  return aliases;
 }
 
 function cleanCellText(text) {

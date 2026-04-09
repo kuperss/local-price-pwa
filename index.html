@@ -11,10 +11,10 @@
       content="本機優先的價格表查詢 PWA，PDF 不上傳，索引只保存在裝置端。"
     />
     <meta name="theme-color" content="#17423c" />
-    <link rel="manifest" href="./manifest.webmanifest?v=45" />
-    <link rel="icon" href="./assets/icon.svg?v=45" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="./assets/icon.svg?v=45" />
-    <link rel="stylesheet" href="./styles.css?v=45" />
+    <link rel="manifest" href="./manifest.webmanifest?v=46" />
+    <link rel="icon" href="./assets/icon.svg?v=46" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./assets/icon.svg?v=46" />
+    <link rel="stylesheet" href="./styles.css?v=46" />
     <title>售價速查表</title>
   </head>
   <body>
@@ -73,14 +73,14 @@
           <input id="file-input" type="file" accept="application/pdf" hidden />
 
           <form id="search-form" class="search-shell">
-            <label class="search-label" for="search-input">搜尋型號、價格或補充資訊</label>
+            <label class="search-label" for="search-input">搜尋型號、中文品名、價格或補充資訊</label>
             <div class="search-row">
               <input
                 id="search-input"
                 type="search"
                 inputmode="search"
                 autocomplete="off"
-                placeholder="例如：A100、底價、贈品、補充資訊"
+                placeholder="例如：A100、戰神天井燈、底價、贈品"
               />
               <button class="primary-button search-button" type="submit">
                 搜尋
@@ -99,7 +99,7 @@
           </div>
 
           <div id="status-banner" class="status-banner" aria-live="polite">
-            尚未載入價格表，請先選擇本地 PDF。
+            尚未載入價格表，請先選擇本地 PDF。匯入後可用型號、中文品名與備註搜尋。
           </div>
         </section>
 
@@ -110,14 +110,14 @@
               <h2 id="results-title">等待匯入價格表</h2>
             </div>
             <p id="results-subtitle" class="results-subtitle">
-              匯入後會在本機建立索引，下次開啟會自動讀取。
+              匯入後會在本機建立索引，支援型號、中文品名與備註搜尋。
             </p>
           </div>
 
           <div id="empty-state" class="empty-state">
             <p class="empty-title">先載入你的 PDF 價格表</p>
             <p class="empty-text">
-              這個售價速查表不會上傳檔案，只會把解析後的資料與原始 PDF 保存在你的裝置。
+              這個售價速查表不會上傳檔案，只會把解析後的資料、中文品名對應與原始 PDF 保存在你的裝置。
             </p>
           </div>
 
@@ -144,6 +144,7 @@
           <div>
             <p class="section-label">品項細節</p>
             <h2 id="detail-title">-</h2>
+            <p id="detail-subtitle" class="detail-subtitle hidden"></p>
           </div>
           <button id="detail-close" class="icon-button" type="button" aria-label="關閉">
             ✕
@@ -179,6 +180,6 @@
       </aside>
     </div>
 
-    <script type="module" src="./app.js?v=45"></script>
+    <script type="module" src="./app.js?v=46"></script>
   </body>
 </html>

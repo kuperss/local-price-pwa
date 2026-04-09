@@ -479,6 +479,13 @@ button {
   letter-spacing: -0.03em;
 }
 
+.result-name {
+  margin: 8px 0 0;
+  color: var(--brand);
+  font-weight: 700;
+  line-height: 1.45;
+}
+
 .page-pill {
   padding: 8px 12px;
   border-radius: 999px;
@@ -635,6 +642,13 @@ body.detail-open .mobile-dock {
 
 .detail-head h2 {
   transition: transform 220ms ease;
+}
+
+.detail-subtitle {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 #detail-close {
