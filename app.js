@@ -22,7 +22,6 @@ const PRODUCT_NAME_HEADER_ALIASES = {
 };
 const V2_PROFILE_ID = "price-sheet-202604-v2";
 const V2_PROFILE_VERSION = 1;
-const V2_FILE_NAME_PATTERN = /202604\)?v2/i;
 const V2_HEADER_ALIASES = {
   sku: ["品編", "型號"],
   retailPrice: ["建議售價"],
@@ -331,9 +330,8 @@ async function buildBundle(fileName, arrayBuffer, hash) {
 }
 
 function detectDocumentProfile(fileName, hash, firstRows) {
-  const normalizedName = String(fileName || "").toLowerCase();
   const header = detectV2Header(firstRows);
-  if (!V2_FILE_NAME_PATTERN.test(normalizedName) || !header) {
+  if (!header) {
     return null;
   }
 
@@ -1019,8 +1017,8 @@ function splitMixedPriceAndNote(value) {
   const match = raw.match(/^\$?\s*(-|\d[\d,]*)(.*)$/);
   if (!match) {
     return {
-      price: normalized,
-      note: "",
+      price: "",
+      note: normalized,
     };
   }
 
