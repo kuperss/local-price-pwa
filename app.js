@@ -2,7 +2,7 @@ import * as pdfjsLib from "./vendor/pdfjs/pdf.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
 
-const APP_VERSION = "47";
+const APP_VERSION = "48";
 
 const DB_NAME = "local-price-pwa";
 const DB_VERSION = 1;
@@ -13,7 +13,7 @@ const SEARCH_HISTORY_LIMIT = 10;
 const MAX_RESULTS_RENDER = 250;
 const ROW_TOLERANCE = 3;
 const HEADER_SEGMENT_GAP = 22;
-const BUNDLE_VERSION = 29;
+const BUNDLE_VERSION = 30;
 const PRODUCT_NAME_FILE = "./name.xlsx";
 const PRODUCT_NAME_LIBRARY_SRC = "./vendor/xlsx/xlsx.full.min.js";
 const WATERMARK_CODE_PATTERN = /\bS(?:1[E-Z]|2[A-Z]{1,2}|3[A-Z]{1,2}|5[A-Z]{1,2})\b/gi;
@@ -680,8 +680,12 @@ function parseV2Row(row, header, pageNumber) {
   const openingSplit = splitMixedPriceAndNote(cells.openingPrice);
   const baseSplit = splitMixedPriceAndNote(cells.basePrice);
   const tierSplit = splitMixedPriceAndNote(cells.tierPrice);
+  const retailSplit = splitRetailPriceAndLeadingNote(
+    cells.retailPrice,
+    Boolean(baseSplit.price || tierSplit.price || openingSplit.price),
+  );
   const note = joinV2Note(
-    joinV2Note(leftData.note, cells.note),
+    joinV2Note(joinV2Note(leftData.note, retailSplit.note), cells.note),
     joinV2Note(joinV2Note(baseSplit.note, tierSplit.note), openingSplit.note),
   );
 
@@ -689,7 +693,7 @@ function parseV2Row(row, header, pageNumber) {
     kind: "entry",
     entry: {
       sku: leftData.sku || cleanCellText(cells.sku),
-      retailPrice: normalizePriceCell(cells.retailPrice),
+      retailPrice: retailSplit.price,
       bonus: normalizeV2Bonus(cells.bonus),
       basePrice: baseSplit.price,
       tierPrice: tierSplit.price,
@@ -1027,6 +1031,43 @@ function splitMixedPriceAndNote(value) {
   return {
     price: normalizePriceCell(match[1]),
     note: cleanCellText(match[2]),
+  };
+}
+
+function splitRetailPriceAndLeadingNote(value, allowLeadingNote = false) {
+  const raw = cleanCellText(value);
+  if (!raw) {
+    return {
+      price: "",
+      note: "",
+    };
+  }
+
+  const normalized = normalizePriceCell(raw);
+  if (looksLikePlainPrice(normalized) || normalized === "-") {
+    return {
+      price: normalized,
+      note: "",
+    };
+  }
+
+  if (allowLeadingNote) {
+    const trailingPriceMatch = raw.match(/^(.*?)(-|\d[\d,]*)$/);
+    if (trailingPriceMatch) {
+      const note = cleanCellText(trailingPriceMatch[1]);
+      const price = normalizePriceCell(trailingPriceMatch[2]);
+      if (note && looksLikePlainPrice(price) && /[A-Za-z\u4e00-\u9fff()\/\[\]°><]/.test(note)) {
+        return {
+          price,
+          note,
+        };
+      }
+    }
+  }
+
+  return {
+    price: normalized,
+    note: "",
   };
 }
 
