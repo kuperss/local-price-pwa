@@ -1,15 +1,15 @@
-const CACHE_NAME = "local-price-pwa-v46";
+const CACHE_NAME = "local-price-pwa-v47";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=46",
-  "./app.js?v=46",
-  "./manifest.webmanifest?v=46",
-  "./assets/icon.svg?v=46",
+  "./styles.css?v=47",
+  "./app.js?v=47",
+  "./manifest.webmanifest?v=47",
+  "./assets/icon.svg?v=47",
   "./vendor/pdfjs/pdf.mjs",
   "./vendor/pdfjs/pdf.worker.mjs",
   "./vendor/pdfjs/LICENSE",
-  "./vendor/xlsx/xlsx.full.min.js?v=46",
+  "./vendor/xlsx/xlsx.full.min.js?v=47",
   "./vendor/xlsx/LICENSE",
 ];
 

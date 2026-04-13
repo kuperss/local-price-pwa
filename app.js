@@ -2,7 +2,7 @@ import * as pdfjsLib from "./vendor/pdfjs/pdf.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
 
-const APP_VERSION = "46";
+const APP_VERSION = "47";
 
 const DB_NAME = "local-price-pwa";
 const DB_VERSION = 1;
@@ -13,9 +13,11 @@ const SEARCH_HISTORY_LIMIT = 10;
 const MAX_RESULTS_RENDER = 250;
 const ROW_TOLERANCE = 3;
 const HEADER_SEGMENT_GAP = 22;
-const BUNDLE_VERSION = 28;
+const BUNDLE_VERSION = 29;
 const PRODUCT_NAME_FILE = "./name.xlsx";
 const PRODUCT_NAME_LIBRARY_SRC = "./vendor/xlsx/xlsx.full.min.js";
+const WATERMARK_CODE_PATTERN = /\bS(?:1[E-Z]|2[A-Z]{1,2}|3[A-Z]{1,2}|5[A-Z]{1,2})\b/gi;
+const WATERMARK_PREFIX_PATTERN = /\bS(?:1[E-Z]|2[A-Z]{1,2}|3[A-Z]{1,2}|5[A-Z]{1,2})(?=\d)/gi;
 const PRODUCT_NAME_HEADER_ALIASES = {
   sku: ["型號", "品編"],
   productName: ["品名", "中文品名", "中文名稱", "名稱"],
@@ -2638,10 +2640,22 @@ function mergeSearchAliases(...groups) {
 }
 
 function cleanCellText(text) {
-  return String(text || "")
+  let cleaned = String(text || "")
     .replace(/\s+/g, " ")
     .replace(/^[|｜]+|[|｜]+$/g, "")
     .trim();
+
+  let previous = "";
+  while (cleaned !== previous) {
+    previous = cleaned;
+    cleaned = cleaned
+      .replace(WATERMARK_PREFIX_PATTERN, "")
+      .replace(WATERMARK_CODE_PATTERN, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+
+  return cleaned;
 }
 
 function joinText(left, right) {
