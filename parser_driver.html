@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Parser Driver</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 20px;
+        font: 14px/1.5 "Microsoft JhengHei UI", sans-serif;
+        background: #f5f7fb;
+        color: #172033;
+      }
+
+      pre {
+        margin: 0;
+        padding: 16px;
+        border-radius: 12px;
+        background: #ffffff;
+        border: 1px solid #d7dfef;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <pre id="output">loading...</pre>
+
+    <script>
+      window.__LOCAL_PRICE_PWA_TEST__ = true;
+    </script>
+    <script type="module">
+      const output = document.querySelector("#output");
+
+      function write(lines) {
+        output.textContent = lines.join("\n");
+      }
+
+      async function run() {
+        await import("./app.js?v=49");
+        const hooks = window.__localPricePwaTestHooks;
+        if (!hooks?.parsePdfBuffer) {
+          throw new Error("parsePdfBuffer hook is not available");
+        }
+        write(["ready=1", "done=1"]);
+      }
+
+      run().catch((error) => {
+        write([
+          "FAILED",
+          `${error.name || "Error"}: ${error.message || String(error)}`,
+          error.stack || "",
+          "done=1",
+        ]);
+      });
+    </script>
+  </body>
+</html>

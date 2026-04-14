@@ -2,7 +2,7 @@ import * as pdfjsLib from "./vendor/pdfjs/pdf.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
 
-const APP_VERSION = "48";
+const APP_VERSION = "49";
 
 const DB_NAME = "local-price-pwa";
 const DB_VERSION = 1;
@@ -13,11 +13,12 @@ const SEARCH_HISTORY_LIMIT = 10;
 const MAX_RESULTS_RENDER = 250;
 const ROW_TOLERANCE = 3;
 const HEADER_SEGMENT_GAP = 22;
-const BUNDLE_VERSION = 30;
+const BUNDLE_VERSION = 31;
 const PRODUCT_NAME_FILE = "./name.xlsx";
 const PRODUCT_NAME_LIBRARY_SRC = "./vendor/xlsx/xlsx.full.min.js";
 const WATERMARK_CODE_PATTERN = /\bS(?:1[E-Z]|2[A-Z]{1,2}|3[A-Z]{1,2}|5[A-Z]{1,2})\b/gi;
 const WATERMARK_PREFIX_PATTERN = /\bS(?:1[E-Z]|2[A-Z]{1,2}|3[A-Z]{1,2}|5[A-Z]{1,2})(?=\d)/gi;
+const WATERMARK_EXACT_PATTERN = /^S(?:1[E-Z]|2[A-Z]{1,2}|3[A-Z]{1,2}|5[A-Z]{1,2})$/i;
 const PRODUCT_NAME_HEADER_ALIASES = {
   sku: ["型號", "品編"],
   productName: ["品名", "中文品名", "中文名稱", "名稱"],
@@ -55,6 +56,10 @@ const EXPLICIT_HEADER_ALIASES = {
   atPrice: ["@"],
 };
 const DETAIL_ANIMATION_MS = 280;
+const WATERMARK_MIN_WIDTH = 160;
+const WATERMARK_MIN_HEIGHT = 90;
+const WATERMARK_MAX_TEXT_LENGTH = 12;
+const IS_TEST_MODE = typeof window !== "undefined" && window.__LOCAL_PRICE_PWA_TEST__ === true;
 
 const COLUMN_DEFS = [
   { key: "sku", label: "型號", aliases: ["品編", "品号", "品號", "型號"] },
@@ -143,10 +148,12 @@ let detailCloseTimer = null;
 let xlsxLibraryPromise = null;
 let productNameResourcePromise = null;
 
-init().catch((error) => {
-  console.error(error);
-  setStatus("初始化失敗，請重新整理頁面後再試一次。");
-});
+if (!IS_TEST_MODE) {
+  init().catch((error) => {
+    console.error(error);
+    setStatus("初始化失敗，請重新整理頁面後再試一次。");
+  });
+}
 
 async function init() {
   bindEvents();
@@ -1409,8 +1416,10 @@ function extractRows(items) {
       x: Number(item.transform?.[4] || 0),
       y: Number(item.transform?.[5] || 0),
       width: Number(item.width || 0),
+      height: getItemVisualHeight(item),
     }))
-    .filter((item) => item.text);
+    .filter((item) => item.text)
+    .filter((item) => !isLikelyWatermarkItem(item));
 
   cleanItems.sort((a, b) => {
     if (Math.abs(a.y - b.y) > ROW_TOLERANCE) {
@@ -1439,6 +1448,35 @@ function extractRows(items) {
       rawText: ordered.map((item) => item.text).join(" "),
     };
   });
+}
+
+function getItemVisualHeight(item) {
+  return Math.max(
+    Math.abs(Number(item.height || 0)),
+    Math.abs(Number(item.transform?.[0] || 0)),
+    Math.abs(Number(item.transform?.[1] || 0)),
+    Math.abs(Number(item.transform?.[2] || 0)),
+    Math.abs(Number(item.transform?.[3] || 0)),
+  );
+}
+
+function isLikelyWatermarkItem(item) {
+  const compactText = String(item.text || "").replace(/\s+/g, "");
+  if (!compactText || compactText.length > WATERMARK_MAX_TEXT_LENGTH) {
+    return false;
+  }
+
+  const width = Math.abs(Number(item.width || 0));
+  const height = Math.abs(Number(item.height || 0));
+  const looksLargeEnough = width >= WATERMARK_MIN_WIDTH && height >= WATERMARK_MIN_HEIGHT;
+  if (!looksLargeEnough) {
+    return false;
+  }
+
+  return (
+    WATERMARK_EXACT_PATTERN.test(compactText) ||
+    /^[\u4e00-\u9fffA-Za-z0-9]+$/.test(compactText)
+  );
 }
 
 function mergeSegments(items, gapThreshold) {
@@ -1812,33 +1850,56 @@ async function onSearchSubmit(event) {
 
 function applySearch(term) {
   const normalized = normalizeForCompare(term);
+  const tokens = buildSearchTokens(term);
   state.filteredEntries = !normalized
     ? state.entries
-    : state.entries.filter((entry) => entryMatchesSearch(entry, normalized));
+    : state.entries.filter((entry) => entryMatchesSearch(entry, normalized, tokens));
 
   renderResults();
   updateDockState();
 }
 
-function entryMatchesSearch(entry, normalized) {
+function entryMatchesSearch(entry, normalized, tokens = []) {
   if (!normalized) {
     return true;
   }
 
-  if (normalized.length <= 3) {
-    const aliases = [
-      entry.sku,
-      ...(entry.searchAliases || []),
-    ]
-      .map((value) => normalizeForCompare(value))
-      .filter(Boolean);
-
-    if (aliases.some((alias) => alias === normalized || alias.startsWith(normalized))) {
-      return true;
-    }
+  const aliases = getEntrySearchAliases(entry);
+  if (normalized.length <= 3 && aliases.some((alias) => alias === normalized || alias.startsWith(normalized))) {
+    return true;
   }
 
-  return (entry.searchText || "").includes(normalized);
+  if ((entry.searchText || "").includes(normalized)) {
+    return true;
+  }
+
+  if (tokens.length <= 1) {
+    return false;
+  }
+
+  return tokens.every((token) => entryMatchesSearchToken(entry, token, aliases));
+}
+
+function entryMatchesSearchToken(entry, token, aliases = getEntrySearchAliases(entry)) {
+  if (!token) {
+    return true;
+  }
+
+  if (token.length <= 3 && aliases.some((alias) => alias === token || alias.startsWith(token))) {
+    return true;
+  }
+
+  return (entry.searchText || "").includes(token);
+}
+
+function getEntrySearchAliases(entry) {
+  return [
+    entry.sku,
+    entry.productName,
+    ...(entry.searchAliases || []),
+  ]
+    .map((value) => normalizeForCompare(value))
+    .filter(Boolean);
 }
 
 function renderShell() {
@@ -2610,11 +2671,16 @@ function getImportedBundleToast(bundle) {
 }
 
 function setStatus(text) {
-  refs.statusBanner.textContent = text;
+  if (refs.statusBanner) {
+    refs.statusBanner.textContent = text;
+  }
 }
 
 let toastTimer = null;
 function showToast(text) {
+  if (!refs.toast) {
+    return;
+  }
   refs.toast.textContent = text;
   refs.toast.classList.remove("hidden");
   window.clearTimeout(toastTimer);
@@ -2678,6 +2744,15 @@ function mergeSearchAliases(...groups) {
   }
 
   return aliases;
+}
+
+function buildSearchTokens(text) {
+  return [...new Set(
+    String(text || "")
+      .split(/[\s：:;,.，。/\\|｜()[\]{}_\-"'`]+/g)
+      .map((value) => normalizeForCompare(value))
+      .filter(Boolean),
+  )];
 }
 
 function cleanCellText(text) {
@@ -2750,6 +2825,20 @@ async function hashBuffer(buffer) {
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+if (typeof window !== "undefined") {
+  window.__localPricePwaTestHooks = {
+    async parsePdfBuffer(fileName, arrayBuffer) {
+      const hash = await hashBuffer(arrayBuffer);
+      const bundle = await buildBundle(fileName, arrayBuffer, hash);
+      return {
+        entryCount: bundle.entries.length,
+        pageCount: bundle.pageCount,
+        profileId: bundle.profileId || "",
+      };
+    },
+  };
 }
 
 function openDb() {

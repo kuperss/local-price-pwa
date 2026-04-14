@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Parser Count Report</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 20px;
+        font: 14px/1.5 "Microsoft JhengHei UI", sans-serif;
+        background: #f5f7fb;
+        color: #172033;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: 22px;
+      }
+
+      pre {
+        margin: 0;
+        padding: 16px;
+        border-radius: 12px;
+        background: #ffffff;
+        border: 1px solid #d7dfef;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Parser Count Report</h1>
+    <pre id="output">準備中...</pre>
+
+    <script>
+      window.__LOCAL_PRICE_PWA_TEST__ = true;
+    </script>
+    <script type="module">
+      const output = document.querySelector("#output");
+      const DEFAULT_DIR = "../給各區/浮水印/";
+
+      function write(lines) {
+        output.textContent = lines.join("\n");
+      }
+
+      function getConfig() {
+        const params = new URLSearchParams(window.location.search);
+        const dir = params.get("dir") || DEFAULT_DIR;
+        const expectParam = params.get("expect");
+        const expectCount =
+          expectParam && Number.isFinite(Number(expectParam)) ? Number(expectParam) : null;
+        return {
+          directoryUrl: new URL(dir, window.location.href).toString(),
+          expectCount,
+        };
+      }
+
+      async function listPdfFiles(directoryUrl) {
+        const html = await fetch(directoryUrl, { cache: "no-store" }).then((response) => response.text());
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        return [...doc.querySelectorAll("a")]
+          .map((anchor) => anchor.getAttribute("href") || "")
+          .filter((href) => href.toLowerCase().endsWith(".pdf"))
+          .map((href) => new URL(href, directoryUrl).toString())
+          .sort((left, right) => left.localeCompare(right, "zh-Hant"));
+      }
+
+      async function fetchPdfBytes(fileUrl, attempts = 3) {
+        let lastError = null;
+
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+          try {
+            const requestUrl = new URL(fileUrl);
+            requestUrl.searchParams.set("_r", `${Date.now()}-${attempt}`);
+            const response = await fetch(requestUrl, { cache: "no-store" });
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status} ${response.statusText}`);
+            }
+
+            const arrayBuffer = await response.arrayBuffer();
+            if (arrayBuffer.byteLength > 0) {
+              return arrayBuffer;
+            }
+
+            lastError = new Error("Fetched 0 bytes");
+          } catch (error) {
+            lastError = error;
+          }
+        }
+
+        throw lastError || new Error("Failed to fetch PDF bytes");
+      }
+
+      function formatError(error) {
+        if (!error) {
+          return ["Unknown error"];
+        }
+        const lines = [`${error.name || "Error"}: ${error.message || String(error)}`];
+        if (error.details) {
+          lines.push(`details: ${error.details}`);
+        }
+        if (error.stack) {
+          lines.push(error.stack);
+        }
+        return lines;
+      }
+
+      async function run() {
+        await import("./app.js?v=49");
+        const hooks = window.__localPricePwaTestHooks;
+        if (!hooks?.parsePdfBuffer) {
+          throw new Error("parsePdfBuffer hook is not available");
+        }
+
+        const { directoryUrl, expectCount } = getConfig();
+        const files = await listPdfFiles(directoryUrl);
+        const lines = [
+          `directory=${decodeURI(directoryUrl)}`,
+          `files=${files.length}`,
+          "",
+          "count\tpages\tbytes\tfileName",
+        ];
+        const results = [];
+        const errors = [];
+
+        for (const fileUrl of files) {
+          const fileName = decodeURIComponent(fileUrl.split("/").pop() || "");
+          const arrayBuffer = await fetchPdfBytes(fileUrl);
+
+          try {
+            const parsed = await hooks.parsePdfBuffer(fileName, arrayBuffer);
+            results.push({ fileName, bytes: arrayBuffer.byteLength, ...parsed });
+            lines.push(`${parsed.entryCount}\t${parsed.pageCount}\t${arrayBuffer.byteLength}\t${fileName}`);
+          } catch (error) {
+            errors.push({ fileName, fileUrl, bytes: arrayBuffer.byteLength, error });
+            lines.push(`ERROR\t-\t${arrayBuffer.byteLength}\t${fileName}`);
+            lines.push(...formatError(error).map((line) => `  ${line}`));
+          }
+        }
+
+        lines.push("");
+        lines.push(`totalEntries=${results.reduce((sum, item) => sum + item.entryCount, 0)}`);
+        lines.push(`errors=${errors.length}`);
+
+        if (expectCount !== null) {
+          const mismatches = results.filter((item) => item.entryCount !== expectCount);
+          lines.push(`expect=${expectCount}`);
+          lines.push(`mismatches=${mismatches.length}`);
+          for (const item of mismatches) {
+            lines.push(`MISMATCH\t${item.entryCount}\t${item.fileName}`);
+          }
+        }
+
+        if (errors.length) {
+          lines.push("");
+          lines.push("errorDetails");
+          for (const item of errors) {
+            lines.push(`FILE\t${item.fileName}`);
+            lines.push(`URL\t${item.fileUrl}`);
+            lines.push(`BYTES\t${item.bytes}`);
+          }
+        }
+
+        lines.push("done=1");
+        write(lines);
+      }
+
+      run().catch((error) => {
+        write(["FAILED", ...formatError(error), "done=1"]);
+      });
+    </script>
+  </body>
+</html>
