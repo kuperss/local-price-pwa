@@ -2,7 +2,7 @@ import * as pdfjsLib from "./vendor/pdfjs/pdf.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
 
-const APP_VERSION = "49";
+const APP_VERSION = new URL(import.meta.url).searchParams.get("v") ?? "?";
 
 const DB_NAME = "local-price-pwa";
 const DB_VERSION = 1;
@@ -56,6 +56,8 @@ const EXPLICIT_HEADER_ALIASES = {
   atPrice: ["@"],
 };
 const DETAIL_ANIMATION_MS = 280;
+const DETAIL_FIELD_CONFIG_KEY = "detail-field-config";
+const UNLOCK_PASSPHRASE_KEY = "unlock-passphrase";
 const WATERMARK_MIN_WIDTH = 160;
 const WATERMARK_MIN_HEIGHT = 90;
 const WATERMARK_MAX_TEXT_LENGTH = 12;
@@ -74,6 +76,18 @@ const COLUMN_DEFS = [
 const OPTIONAL_PARSE_COLUMNS = [
   { key: "atPrice", label: "@", aliases: ["@", "＠"] },
 ];
+
+const JSON_FIELD_MAP = {
+  "型號": "sku",
+  "中文品名": "productName",
+  "搭贈": "bonus",
+  "底價": "basePrice",
+  "量價": "tierPrice",
+  "開盤價": "openingPrice",
+  "建議售價": "retailPrice",
+  "補充資訊": "note",
+  "備註": "note",
+};
 
 const COPYABLE_PRICE_KEYS = ["bonus", "basePrice", "tierPrice", "openingPrice"];
 const COPY_LABELS = {
@@ -94,10 +108,12 @@ const state = {
   previewPage: 1,
   previewRenderTask: null,
   beforeInstallPrompt: null,
+  detailFieldConfig: [],
 };
 
 const refs = {
   fileInput: document.querySelector("#file-input"),
+  panelMoreOptions: document.querySelector(".panel-more-options"),
   importButton: document.querySelector("#import-button"),
   clearButton: document.querySelector("#clear-button"),
   clearHistoryButton: document.querySelector("#clear-history-button"),
@@ -131,6 +147,32 @@ const refs = {
   previewCanvas: document.querySelector("#preview-canvas"),
   previewPrev: document.querySelector("#preview-prev"),
   previewNext: document.querySelector("#preview-next"),
+  previewZone: document.querySelector("#preview-zone"),
+  jsonFileInput: document.querySelector("#json-file-input"),
+  jsonImportButton: document.querySelector("#json-import-button"),
+  settingsButton: document.querySelector("#settings-button"),
+  fieldSettingsOverlay: document.querySelector("#field-settings-overlay"),
+  fieldSettingsBackdrop: document.querySelector("#field-settings-backdrop"),
+  fieldSettingsSheet: document.querySelector("#field-settings-sheet"),
+  fieldSettingsClose: document.querySelector("#field-settings-close"),
+  fieldSettingsList: document.querySelector("#field-settings-list"),
+  fieldSettingsReset: document.querySelector("#field-settings-reset"),
+  logoEl: document.querySelector(".app-logo"),
+  modePillEl: document.querySelector(".app-mode-pill"),
+  pinOverlay: document.querySelector("#pin-overlay"),
+  pinInput: document.querySelector("#pin-input"),
+  pinConfirm: document.querySelector("#pin-confirm"),
+  pinCancel: document.querySelector("#pin-cancel"),
+  pinError: document.querySelector("#pin-error"),
+  pinDialogTitle: document.querySelector("#pin-dialog-title"),
+  pinDialogHint: document.querySelector("#pin-dialog-hint"),
+  pinRemember: document.querySelector("#pin-remember"),
+  pinManageBtn: document.querySelector("#pin-manage-btn"),
+  pinClearSaved: document.querySelector("#pin-clear-saved"),
+  pinSaveNew: document.querySelector("#pin-save-new"),
+  pinNewInput: document.querySelector("#pin-new-input"),
+  pinUnlockSection: document.querySelector("#pin-unlock-section"),
+  pinManageSection: document.querySelector("#pin-manage-section"),
 };
 
 const detailSheetDrag = {
@@ -156,8 +198,11 @@ if (!IS_TEST_MODE) {
 }
 
 async function init() {
+  const versionEl = document.querySelector(".app-version");
+  if (versionEl) versionEl.textContent = `v${APP_VERSION}`;
   bindEvents();
   state.searchHistory = (await getValue(SEARCH_HISTORY_KEY)) || [];
+  await loadDetailFieldConfig();
   renderHistory();
   renderShell();
   updateDockState();
@@ -169,6 +214,28 @@ async function init() {
 function bindEvents() {
   refs.importButton.addEventListener("click", () => refs.fileInput.click());
   refs.fileInput.addEventListener("change", onFileSelected);
+  refs.jsonImportButton.addEventListener("click", () => refs.jsonFileInput.click());
+  refs.jsonFileInput.addEventListener("change", onJsonFileSelected);
+  refs.settingsButton?.addEventListener("click", openFieldSettings);
+  // 更多選項：點選任何按鈕後自動收回 <details>
+  refs.panelMoreOptions?.addEventListener("click", (e) => {
+    if (e.target.closest("button")) {
+      requestAnimationFrame(() => {
+        if (refs.panelMoreOptions) refs.panelMoreOptions.removeAttribute("open");
+      });
+    }
+  });
+  refs.fieldSettingsClose?.addEventListener("click", closeFieldSettings);
+  refs.fieldSettingsBackdrop?.addEventListener("click", closeFieldSettings);
+  refs.fieldSettingsReset?.addEventListener("click", resetFieldConfig);
+  bindUnlockGesture();
+  refs.pinConfirm?.addEventListener("click", onPassphraseConfirm);
+  refs.pinCancel?.addEventListener("click", closePinDialog);
+  refs.pinOverlay?.addEventListener("click", (e) => { if (e.target === refs.pinOverlay) closePinDialog(); });
+  refs.pinInput?.addEventListener("keydown", (e) => { if (e.key === "Enter") onPassphraseConfirm(); });
+  refs.pinManageBtn?.addEventListener("click", toggleManageMode);
+  refs.pinClearSaved?.addEventListener("click", clearSavedPassphrase);
+  refs.pinSaveNew?.addEventListener("click", saveNewPassphrase);
   refs.clearButton.addEventListener("click", clearStoredDocument);
   refs.clearHistoryButton.addEventListener("click", clearSearchHistory);
   refs.searchForm.addEventListener("submit", onSearchSubmit);
@@ -227,6 +294,102 @@ async function onFileSelected(event) {
   } finally {
     refs.fileInput.value = "";
   }
+}
+
+async function onJsonFileSelected(event) {
+  const [file] = event.target.files || [];
+  if (!file) return;
+  try {
+    setStatus(`正在讀取 ${file.name}...`);
+    const text = await file.text();
+    const jsonData = JSON.parse(text);
+    let rawEntries, protConfig = null;
+    if (Array.isArray(jsonData)) {
+      // 舊格式：明文陣列
+      if (jsonData.length === 0) throw new Error("JSON 格式錯誤，請確認為非空陣列格式。");
+      rawEntries = jsonData;
+    } else if (jsonData._v === 2 && jsonData.data) {
+      // 新格式：加密 wrapper
+      protConfig = { salt: jsonData._salt, iv: jsonData._iv, data: jsonData.data };
+      rawEntries = [];
+    } else {
+      throw new Error("JSON 格式錯誤，請確認為正確格式。");
+    }
+    const hash = await hashBuffer(await file.arrayBuffer());
+    setStatus("正在建立本機索引...");
+    const bundle = buildBundleFromJson(file.name, rawEntries, hash, protConfig);
+    await setValue(ACTIVE_DOCUMENT_KEY, bundle);
+    await activateBundleFromJson(bundle);
+    if (protConfig) {
+      setStatus(`已載入加密價格表：${file.name}。完成解鎖手勢後輸入密碼即可查看。`);
+      showToast("加密價格表已載入，請解鎖後查看");
+    } else {
+      setStatus(`已從 JSON 載入 ${bundle.entries.length} 筆資料：${file.name}`);
+      showToast(`已載入 ${bundle.entries.length} 筆資料`);
+    }
+  } catch (error) {
+    console.error("JSON import failed", error);
+    const detail = error instanceof Error ? ` ${error.message}` : "";
+    setStatus(`JSON 解析失敗。${detail}`);
+    showToast("JSON 解析失敗，請確認格式正確。");
+  } finally {
+    refs.jsonFileInput.value = "";
+  }
+}
+
+function buildBundleFromJson(fileName, jsonData, hash, protConfig = null) {
+  const entries = jsonData.map((row, index) => {
+    const entry = { pageNumber: 0, searchAliases: [], extras: [] };
+    for (const [col, val] of Object.entries(row)) {
+      const key = JSON_FIELD_MAP[col];
+      const strVal = val === null || val === undefined ? "" : String(val);
+      if (key) {
+        entry[key] = strVal;
+      } else if (strVal) {
+        entry.extras.push({ label: col, value: strVal });
+      }
+    }
+    entry.sku = entry.sku || "";
+    entry.productName = entry.productName || "";
+    const extrasText = entry.extras.map((e) => e.value).join(" ");
+    entry.id = `json-${entry.sku || "row"}-${index}`;
+    entry.searchText = normalizeForCompare(
+      [entry.sku, entry.productName, entry.bonus, entry.basePrice,
+       entry.tierPrice, entry.openingPrice, entry.retailPrice, entry.note, extrasText]
+        .filter(Boolean).join(" "),
+    );
+    return entry;
+  });
+
+  return {
+    id: ACTIVE_DOCUMENT_KEY,
+    version: BUNDLE_VERSION,
+    source: "json",
+    fileName,
+    hash,
+    importedAt: new Date().toISOString(),
+    pageCount: 0,
+    nameMapHash: "",
+    entries,
+    pdfBytes: null,
+    protConfig,
+  };
+}
+
+async function activateBundleFromJson(bundle) {
+  if (state.pdfDoc) {
+    try {
+      await state.pdfDoc.destroy();
+    } catch (error) {
+      console.warn("Failed to destroy previous PDF document", error);
+    }
+    state.pdfDoc = null;
+  }
+  state.bundle = bundle;
+  state.entries = bundle.entries || [];
+  await syncDetailFieldConfig(state.entries);
+  applySearch(state.searchTerm);
+  renderShell();
 }
 
 async function buildBundle(fileName, arrayBuffer, hash) {
@@ -1763,6 +1926,9 @@ function mergeEntry(entries, incoming) {
 }
 
 async function activateBundle(bundle) {
+  if (bundle.source === "json") {
+    return activateBundleFromJson(bundle);
+  }
   const pdfBytes = ensureArrayBuffer(bundle.pdfBytes);
   const parserPdfBytes = pdfBytes.slice(0);
   if (state.pdfDoc) {
@@ -1779,6 +1945,7 @@ async function activateBundle(bundle) {
   };
   state.entries = bundle.entries || [];
   state.pdfDoc = await pdfjsLib.getDocument({ data: new Uint8Array(parserPdfBytes) }).promise;
+  await syncDetailFieldConfig(state.entries);
   applySearch(state.searchTerm);
   renderShell();
 }
@@ -1802,6 +1969,9 @@ async function loadCachedBundle() {
 }
 
 async function upgradeBundleIfNeeded(bundle) {
+  if (bundle.source === "json") {
+    return bundle;
+  }
   const productNameResource = await getProductNameResource();
   const currentNameMapHash = productNameResource.hash || "";
   if (bundle?.version === BUNDLE_VERSION && (bundle?.nameMapHash || "") === currentNameMapHash) {
@@ -2142,6 +2312,461 @@ async function copyField(entry, key) {
   }
 }
 
+// ── Web Crypto 工具 ──────────────────────────────────────────
+
+function uint8ArrayToBase64(arr) {
+  let binary = "";
+  const chunk = 8192;
+  for (let i = 0; i < arr.length; i += chunk) {
+    binary += String.fromCharCode(...arr.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8Array(str) {
+  return Uint8Array.from(atob(str), (c) => c.charCodeAt(0));
+}
+
+async function deriveDecryptKey(passphrase, saltBytes) {
+  const enc = new TextEncoder();
+  const km = await crypto.subtle.importKey(
+    "raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt: saltBytes, iterations: 100000, hash: "SHA-256" },
+    km, { name: "AES-GCM", length: 256 }, false, ["decrypt"]
+  );
+}
+
+async function decryptData(cipherBytes, key, ivBytes) {
+  const buf = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivBytes }, key, cipherBytes);
+  return new TextDecoder().decode(buf);
+}
+
+// ── 隱形解鎖手勢（本機×5 → 價×5 → 本機×3）────────────────────
+
+function bindUnlockGesture() {
+  const SEQ = [
+    { key: "pill", needed: 5 },
+    { key: "logo", needed: 5 },
+    { key: "pill", needed: 3 },
+  ];
+  let step = 0, count = 0, timer = null;
+  function reset() { step = 0; count = 0; clearTimeout(timer); }
+  function advance(key) {
+    if (SEQ[step].key !== key) { reset(); return; }
+    count++;
+    clearTimeout(timer);
+    timer = setTimeout(reset, 3000);
+    if (count >= SEQ[step].needed) {
+      clearTimeout(timer);
+      count = 0;
+      step++;
+      if (step >= SEQ.length) {
+        reset();
+        openPassphraseDialog();
+      } else {
+        timer = setTimeout(reset, 3000);
+      }
+    }
+  }
+  refs.logoEl?.addEventListener("click",     () => advance("logo"));
+  refs.modePillEl?.addEventListener("click", () => advance("pill"));
+}
+
+// ── 解鎖對話框 ────────────────────────────────────────────────
+
+async function openPassphraseDialog() {
+  if (!state.bundle?.protConfig) {
+    showToast("請先載入加密格式的 JSON 價格表");
+    return;
+  }
+  const saved = await getValue(UNLOCK_PASSPHRASE_KEY);
+  refs.pinDialogTitle.textContent = "解鎖價格表";
+  refs.pinDialogHint.textContent  = saved
+    ? "已儲存密碼，直接確認即可。"
+    : "輸入轉換時設定的密碼。";
+  refs.pinInput.value = saved || "";
+  refs.pinError.classList.add("hidden");
+  if (refs.pinRemember) refs.pinRemember.checked = true;
+  setManageMode(false);
+  refs.pinOverlay.classList.remove("hidden");
+  refs.pinOverlay.setAttribute("aria-hidden", "false");
+  window.requestAnimationFrame(() => refs.pinOverlay.classList.add("is-visible"));
+  if (!saved) refs.pinInput.focus();
+}
+
+function closePinDialog() {
+  refs.pinOverlay.classList.remove("is-visible");
+  window.setTimeout(() => {
+    refs.pinOverlay.classList.add("hidden");
+    refs.pinOverlay.setAttribute("aria-hidden", "true");
+    if (refs.pinInput) refs.pinInput.value = "";
+    if (refs.pinNewInput) refs.pinNewInput.value = "";
+  }, 200);
+}
+
+async function onPassphraseConfirm() {
+  const passphrase = refs.pinInput?.value;
+  if (!passphrase) return;
+  refs.pinError.classList.add("hidden");
+  try {
+    await unlockBundle(passphrase);
+    if (refs.pinRemember?.checked) {
+      await setValue(UNLOCK_PASSPHRASE_KEY, passphrase);
+    }
+    closePinDialog();
+    showToast("已解鎖，重新整理後自動鎖回");
+  } catch {
+    refs.pinError.classList.remove("hidden");
+    refs.pinInput.select();
+  }
+}
+
+async function unlockBundle(passphrase) {
+  const { salt, iv, data } = state.bundle.protConfig;
+  const saltBytes = base64ToUint8Array(salt);
+  const ivBytes   = base64ToUint8Array(iv);
+  const key = await deriveDecryptKey(passphrase, saltBytes);
+  const plain = await decryptData(base64ToUint8Array(data), key, ivBytes);
+  const rawEntries = JSON.parse(plain);
+  const rebuilt = buildBundleFromJson(state.bundle.fileName, rawEntries, state.bundle.hash, null);
+  state.bundle.entries = rebuilt.entries;
+  state.entries = rebuilt.entries;
+  // 解鎖後強制重建欄位設定（加密載入時 entries 為空，舊 config 沒有 extras 欄位）
+  state.detailFieldConfig = [];
+  await syncDetailFieldConfig(state.entries);
+  applySearch(state.searchTerm);
+  renderShell();
+}
+
+// ── 密碼管理（對話框內 ⚙ 切換）──────────────────────────────
+
+let _pinManageMode = false;
+
+function toggleManageMode() { setManageMode(!_pinManageMode); }
+
+function setManageMode(on) {
+  _pinManageMode = on;
+  refs.pinManageSection?.classList.toggle("hidden", !on);
+  refs.pinUnlockSection?.classList.toggle("hidden", on);
+  if (refs.pinDialogTitle) {
+    refs.pinDialogTitle.textContent = on ? "管理密碼" : "解鎖價格表";
+  }
+  if (refs.pinDialogHint) {
+    refs.pinDialogHint.textContent = on ? "" : refs.pinDialogHint.textContent;
+  }
+}
+
+async function clearSavedPassphrase() {
+  await deleteValue(UNLOCK_PASSPHRASE_KEY);
+  showToast("已清除本機記憶的密碼");
+  closePinDialog();
+}
+
+async function saveNewPassphrase() {
+  const newPw = refs.pinNewInput?.value.trim();
+  if (!newPw) return;
+  await setValue(UNLOCK_PASSPHRASE_KEY, newPw);
+  showToast("新密碼已儲存至本機");
+  closePinDialog();
+}
+
+// ── Detail Field Config ──────────────────────────────────────
+
+async function loadDetailFieldConfig() {
+  const saved = await getValue(DETAIL_FIELD_CONFIG_KEY);
+  if (saved && Array.isArray(saved) && saved.length > 0) {
+    state.detailFieldConfig = saved;
+  }
+}
+
+function buildDefaultFieldConfig(entries) {
+  const config = [];
+  // Standard fields from COLUMN_DEFS — all visible by default
+  COLUMN_DEFS.forEach((col, i) => {
+    config.push({ key: col.key, label: col.label, source: "standard", visible: true, order: i });
+  });
+  // Extra fields — collect unique labels across all entries
+  const extraKeys = new Set();
+  for (const entry of entries) {
+    for (const { label } of entry.extras || []) {
+      extraKeys.add(label);
+    }
+  }
+  let extraOrder = COLUMN_DEFS.length;
+  let extraCount = 0;
+  for (const label of extraKeys) {
+    config.push({ key: label, label, source: "extra", visible: extraCount < 5, order: extraOrder++ });
+    extraCount++;
+  }
+  return config;
+}
+
+async function syncDetailFieldConfig(entries) {
+  // First time: build default
+  if (state.detailFieldConfig.length === 0) {
+    state.detailFieldConfig = buildDefaultFieldConfig(entries);
+    await saveDetailFieldConfig();
+    return;
+  }
+  // Merge: add new extra keys from new data that aren't already tracked
+  const existingKeys = new Set(state.detailFieldConfig.map((c) => c.key));
+  const maxOrder = Math.max(...state.detailFieldConfig.map((c) => c.order), -1);
+  let nextOrder = maxOrder + 1;
+  let changed = false;
+  for (const entry of entries) {
+    for (const { label } of entry.extras || []) {
+      if (!existingKeys.has(label)) {
+        state.detailFieldConfig.push({ key: label, label, source: "extra", visible: false, order: nextOrder++ });
+        existingKeys.add(label);
+        changed = true;
+      }
+    }
+  }
+  if (changed) await saveDetailFieldConfig();
+}
+
+async function saveDetailFieldConfig() {
+  await setValue(DETAIL_FIELD_CONFIG_KEY, state.detailFieldConfig);
+}
+
+function openFieldSettings() {
+  if (!refs.fieldSettingsOverlay) return;
+  if (state.detailFieldConfig.length === 0) {
+    showToast("請先載入價格表，再設定欄位顯示。");
+    return;
+  }
+  renderFieldSettingsList();
+  refs.fieldSettingsOverlay.classList.remove("hidden");
+  refs.fieldSettingsOverlay.setAttribute("aria-hidden", "false");
+  document.body.classList.add("detail-open");
+  window.requestAnimationFrame(() => refs.fieldSettingsOverlay.classList.add("is-visible"));
+}
+
+function closeFieldSettings() {
+  if (!refs.fieldSettingsOverlay) return;
+  refs.fieldSettingsOverlay.classList.remove("is-visible");
+  if (refs.fieldSettingsSheet) {
+    refs.fieldSettingsSheet.style.transform = "translateY(calc(100% + 24px)) scale(0.985)";
+    refs.fieldSettingsSheet.style.opacity = "0.94";
+  }
+  window.setTimeout(() => {
+    refs.fieldSettingsOverlay.classList.add("hidden");
+    refs.fieldSettingsOverlay.setAttribute("aria-hidden", "true");
+    if (refs.fieldSettingsSheet) {
+      refs.fieldSettingsSheet.style.transform = "";
+      refs.fieldSettingsSheet.style.opacity = "";
+    }
+    // Only remove body class if detail sheet is also closed
+    if (!refs.detailOverlay || refs.detailOverlay.classList.contains("hidden")) {
+      document.body.classList.remove("detail-open");
+    }
+  }, DETAIL_ANIMATION_MS);
+}
+
+async function resetFieldConfig() {
+  if (state.entries.length === 0) return;
+  state.detailFieldConfig = buildDefaultFieldConfig(state.entries);
+  await saveDetailFieldConfig();
+  renderFieldSettingsList();
+  showToast("已重置為預設欄位設定");
+}
+
+function renderFieldSettingsList() {
+  if (!refs.fieldSettingsList) return;
+  const sorted = [...state.detailFieldConfig].sort((a, b) => a.order - b.order);
+  refs.fieldSettingsList.innerHTML = sorted.map((item) => `
+    <li class="fs-row" data-key="${escapeHtml(item.key)}" draggable="true">
+      <span class="fs-handle" title="拖動排序">☰</span>
+      <label class="fs-label">
+        <input type="checkbox" class="fs-check" ${item.visible ? "checked" : ""}>
+        <span>${escapeHtml(item.label)}</span>
+        ${item.source === "extra" ? '<span class="fs-tag">額外</span>' : ""}
+      </label>
+    </li>
+  `).join("");
+
+  // Checkbox toggle
+  refs.fieldSettingsList.querySelectorAll(".fs-check").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const row = checkbox.closest(".fs-row");
+      const key = row?.dataset.key;
+      if (!key) return;
+      const item = state.detailFieldConfig.find((c) => c.key === key);
+      if (item) {
+        item.visible = checkbox.checked;
+        saveDetailFieldConfig();
+      }
+    });
+  });
+
+  // Desktop drag-to-reorder (HTML5 DnD)
+  bindFieldListDragDesktop(refs.fieldSettingsList);
+  // Mobile drag-to-reorder (touch events)
+  bindFieldListDragTouch(refs.fieldSettingsList);
+}
+
+function bindFieldListDragDesktop(list) {
+  let dragSrcEl = null;
+
+  list.querySelectorAll(".fs-row").forEach((row) => {
+    row.addEventListener("dragstart", (e) => {
+      dragSrcEl = row;
+      e.dataTransfer.effectAllowed = "move";
+      window.requestAnimationFrame(() => row.classList.add("dragging"));
+    });
+    row.addEventListener("dragend", () => {
+      row.classList.remove("dragging");
+      list.querySelectorAll(".drag-over").forEach((r) => r.classList.remove("drag-over"));
+      dragSrcEl = null;
+    });
+    row.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      list.querySelectorAll(".drag-over").forEach((r) => r.classList.remove("drag-over"));
+      if (row !== dragSrcEl) row.classList.add("drag-over");
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
+    row.addEventListener("drop", (e) => {
+      e.preventDefault();
+      row.classList.remove("drag-over");
+      if (!dragSrcEl || dragSrcEl === row) return;
+      const allRows = [...list.querySelectorAll(".fs-row")];
+      const srcIdx = allRows.indexOf(dragSrcEl);
+      const dstIdx = allRows.indexOf(row);
+      if (srcIdx < dstIdx) row.after(dragSrcEl);
+      else row.before(dragSrcEl);
+      commitFieldOrder(list);
+    });
+  });
+}
+
+function bindFieldListDragTouch(list) {
+  let touchDragEl = null;
+  let touchClone = null;
+  let touchOffsetY = 0;
+  let autoScrollTimer = null;
+
+  const SCROLL_ZONE = 72;  // px 距離 sheet 頂 / 底部多近時開始自動捲動
+  const SCROLL_SPEED = 5;  // px/frame
+
+  function stopAutoScroll() {
+    if (autoScrollTimer) {
+      clearInterval(autoScrollTimer);
+      autoScrollTimer = null;
+    }
+  }
+
+  function startAutoScroll(direction) {
+    stopAutoScroll();
+    autoScrollTimer = setInterval(() => {
+      if (refs.fieldSettingsSheet) refs.fieldSettingsSheet.scrollTop += direction * SCROLL_SPEED;
+    }, 16);
+  }
+
+  list.querySelectorAll(".fs-handle").forEach((handle) => {
+    handle.addEventListener("touchstart", (e) => {
+      if (e.touches.length !== 1) return;
+      const row = handle.closest(".fs-row");
+      if (!row) return;
+      touchDragEl = row;
+      const touch = e.touches[0];
+      const rect = row.getBoundingClientRect();
+      touchOffsetY = touch.clientY - rect.top;
+
+      // 建立視覺克隆（固定定位，跟著手指移動）
+      touchClone = row.cloneNode(true);
+      Object.assign(touchClone.style, {
+        position: "fixed",
+        left: rect.left + "px",
+        width: rect.width + "px",
+        top: touch.clientY - touchOffsetY + "px",
+        opacity: "0.88",
+        zIndex: "9999",
+        pointerEvents: "none",
+        borderRadius: "12px",
+        boxShadow: "0 8px 28px rgba(0,0,0,0.2)",
+        background: "var(--surface-strong)",
+        transition: "none",
+      });
+      document.body.appendChild(touchClone);
+      row.classList.add("dragging");
+      e.preventDefault();
+    }, { passive: false });
+
+    handle.addEventListener("touchmove", (e) => {
+      if (!touchDragEl || !touchClone || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      touchClone.style.top = touch.clientY - touchOffsetY + "px";
+
+      // 自動捲動：手指靠近 sheet 頂/底時觸發
+      const sheet = refs.fieldSettingsSheet;
+      if (sheet) {
+        const sheetRect = sheet.getBoundingClientRect();
+        if (touch.clientY < sheetRect.top + SCROLL_ZONE) {
+          startAutoScroll(-1);
+        } else if (touch.clientY > sheetRect.bottom - SCROLL_ZONE) {
+          startAutoScroll(1);
+        } else {
+          stopAutoScroll();
+        }
+      }
+
+      // 即時重排：找到手指下方的列，立刻在 DOM 中移動
+      const otherRows = [...list.querySelectorAll(".fs-row:not(.dragging)")];
+      const target = otherRows.find((r) => {
+        const rect = r.getBoundingClientRect();
+        return touch.clientY >= rect.top && touch.clientY <= rect.bottom;
+      });
+      if (target) {
+        const allRows = [...list.querySelectorAll(".fs-row")];
+        const srcIdx = allRows.indexOf(touchDragEl);
+        const dstIdx = allRows.indexOf(target);
+        if (srcIdx !== dstIdx) {
+          if (srcIdx < dstIdx) target.after(touchDragEl);
+          else target.before(touchDragEl);
+        }
+      }
+
+      e.preventDefault();
+    }, { passive: false });
+
+    handle.addEventListener("touchend", () => {
+      stopAutoScroll();
+      if (!touchDragEl) return;
+      if (touchClone) {
+        document.body.removeChild(touchClone);
+        touchClone = null;
+      }
+      touchDragEl.classList.remove("dragging");
+      commitFieldOrder(list);
+      touchDragEl = null;
+    });
+
+    handle.addEventListener("touchcancel", () => {
+      stopAutoScroll();
+      if (touchClone) {
+        document.body.removeChild(touchClone);
+        touchClone = null;
+      }
+      if (touchDragEl) {
+        touchDragEl.classList.remove("dragging");
+        touchDragEl = null;
+      }
+    });
+  });
+}
+
+function commitFieldOrder(list) {
+  const newOrder = [...list.querySelectorAll(".fs-row")].map((r) => r.dataset.key);
+  newOrder.forEach((key, order) => {
+    const item = state.detailFieldConfig.find((c) => c.key === key);
+    if (item) item.order = order;
+  });
+  saveDetailFieldConfig();
+}
+
 function openDetail(entry) {
   window.clearTimeout(detailCloseTimer);
   state.selectedEntry = entry;
@@ -2152,7 +2777,60 @@ function openDetail(entry) {
     refs.detailSubtitle.textContent = entry.productName || "";
     refs.detailSubtitle.classList.toggle("hidden", !entry.productName);
   }
-  refs.detailGrid.innerHTML = COLUMN_DEFS.map((column) => renderDetailItem(column, entry)).join("");
+  const isJsonSource = state.bundle?.source === "json";
+  if (refs.previewZone) {
+    refs.previewZone.classList.toggle("hidden", isJsonSource);
+  }
+
+  // Render fields using detailFieldConfig if available, otherwise fall back to default
+  if (state.detailFieldConfig.length > 0) {
+    const visibleFields = [...state.detailFieldConfig]
+      .sort((a, b) => a.order - b.order)
+      .filter((f) => f.visible);
+    refs.detailGrid.innerHTML = visibleFields.map((item) => {
+      if (item.source === "standard") {
+        const col = COLUMN_DEFS.find((c) => c.key === item.key);
+        return col ? renderDetailItem(col, entry) : "";
+      } else {
+        const extra = (entry.extras || []).find((e) => e.label === item.key);
+        const val = extra?.value || "-";
+        const copyable = extra?.value ? `data-copy-value="${escapeHtml(val)}"` : "";
+        return `
+          <div class="detail-item${extra?.value ? " detail-item-copyable" : ""}" ${copyable}>
+            <span class="detail-item-label">${escapeHtml(item.label)}</span>
+            <span class="detail-item-value">${escapeHtml(val)}</span>
+          </div>`;
+      }
+    }).join("");
+  } else {
+    const extraRows = (entry.extras || []).map(({ label, value }) => `
+      <div class="detail-item${value ? " detail-item-copyable" : ""}" ${value ? `data-copy-value="${escapeHtml(value)}"` : ""}>
+        <span class="detail-item-label">${escapeHtml(label)}</span>
+        <span class="detail-item-value">${escapeHtml(value || "-")}</span>
+      </div>
+    `).join("");
+    refs.detailGrid.innerHTML = COLUMN_DEFS.map((column) => renderDetailItem(column, entry)).join("") + extraRows;
+  }
+  // 點擊任意欄位 → 複製「型號 品名 標籤 值」
+  refs.detailGrid.addEventListener("click", (e) => {
+    const item = e.target.closest("[data-copy-value]");
+    if (!item) return;
+    const value = item.dataset.copyValue;
+    if (!value) return;
+    const copyKey = item.dataset.copyKey;
+    const label = copyKey
+      ? getCopyLabel(copyKey)
+      : (item.querySelector(".detail-item-label")?.textContent || "");
+    const copyEntry = state.selectedEntry;
+    const text = [copyEntry?.sku, copyEntry?.productName, label, value]
+      .map((p) => String(p || "").trim())
+      .filter(Boolean)
+      .join(" ");
+    copyToClipboard(text)
+      .then(() => showToast(`已複製：${text}`))
+      .catch(() => showToast("複製失敗，請確認頁面已允許剪貼簿權限。"));
+  });
+
   refs.copyActions.innerHTML = COPYABLE_PRICE_KEYS.map((key) => {
     const label = getCopyLabel(key);
     const value = entry[key] || "-";
@@ -2188,10 +2866,14 @@ function openDetail(entry) {
 }
 
 function renderDetailItem(column, entry) {
+  const value = entry[column.key] || "-";
+  const copyable = entry[column.key]
+    ? `data-copy-value="${escapeHtml(value)}" data-copy-key="${escapeHtml(column.key)}"`
+    : "";
   return `
-    <div class="detail-item">
+    <div class="detail-item${entry[column.key] ? " detail-item-copyable" : ""}" ${copyable}>
       <span class="detail-item-label">${column.label}</span>
-      <span class="detail-item-value">${escapeHtml(entry[column.key] || "-")}</span>
+      <span class="detail-item-value">${escapeHtml(value)}</span>
     </div>
   `;
 }

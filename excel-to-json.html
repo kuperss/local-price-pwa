@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Excel → JSON 轉換工具</title>
+    <style>
+      :root {
+        --brand: #17423c;
+        --accent: #c96d3b;
+        --surface: #f8f4eb;
+        --radius: 16px;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Noto Sans TC", sans-serif;
+        background: #f0ebe0;
+        color: #1a1a1a;
+        min-height: 100vh;
+        padding: 24px 16px;
+      }
+      .container { max-width: 800px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+      header { text-align: center; padding: 12px 0; }
+      header h1 { font-size: 1.6rem; color: var(--brand); margin-bottom: 6px; }
+      header p { color: #666; font-size: 0.9rem; }
+      .card {
+        background: var(--surface);
+        border-radius: var(--radius);
+        padding: 20px;
+        box-shadow: 0 2px 12px rgba(23,66,60,0.08);
+      }
+      .card h2 { font-size: 1rem; color: var(--brand); margin-bottom: 14px; }
+      .drop-zone {
+        display: block;
+        border: 2px dashed rgba(23,66,60,0.3);
+        border-radius: 12px;
+        padding: 32px;
+        text-align: center;
+        cursor: pointer;
+        transition: border-color 0.2s, background 0.2s;
+      }
+      .drop-zone:hover, .drop-zone.dragover {
+        border-color: var(--brand);
+        background: rgba(23,66,60,0.04);
+      }
+      .drop-zone input[type=file] { display: none; }
+      .drop-zone-icon { font-size: 2.5rem; margin-bottom: 10px; }
+      .drop-zone p { color: #555; font-size: 0.9rem; }
+      .drop-zone strong { color: var(--brand); }
+      .field-map-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+      .field-map-table th {
+        background: rgba(23,66,60,0.08);
+        padding: 8px 12px;
+        text-align: left;
+        font-weight: 600;
+        color: var(--brand);
+        border-radius: 4px;
+      }
+      .field-map-table td { padding: 6px 12px; border-bottom: 1px solid rgba(0,0,0,0.06); }
+      .field-map-table tr:last-child td { border-bottom: none; }
+      .tag {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+      }
+      .tag-sku { background: #e8f4f0; color: var(--brand); }
+      .tag-skip { background: #f5e6e0; color: #a04020; }
+      .tag-extra { background: #f0ebe0; color: #666; }
+      .stats {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .stat {
+        flex: 1;
+        min-width: 120px;
+        background: rgba(23,66,60,0.06);
+        border-radius: 10px;
+        padding: 12px 16px;
+      }
+      .stat-label { font-size: 0.75rem; color: #666; margin-bottom: 4px; }
+      .stat-value { font-size: 1.4rem; font-weight: 700; color: var(--brand); }
+      .preview-table-wrapper { overflow-x: auto; margin-top: 10px; }
+      .preview-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.78rem;
+        white-space: nowrap;
+      }
+      .preview-table th {
+        background: rgba(23,66,60,0.08);
+        padding: 6px 10px;
+        text-align: left;
+        font-weight: 600;
+        color: var(--brand);
+      }
+      .preview-table td {
+        padding: 5px 10px;
+        border-bottom: 1px solid rgba(0,0,0,0.06);
+        max-width: 200px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .preview-table tr:hover td { background: rgba(23,66,60,0.03); }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+      .btn-primary {
+        flex: 1;
+        min-height: 46px;
+        padding: 0 20px;
+        border: none;
+        border-radius: 999px;
+        background: var(--brand);
+        color: #f8f4eb;
+        font-weight: 700;
+        font-size: 1rem;
+        cursor: pointer;
+        transition: opacity 0.15s, transform 0.15s;
+      }
+      .btn-primary:hover { opacity: 0.88; transform: translateY(-1px); }
+      .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+      .btn-ghost {
+        min-height: 46px;
+        padding: 0 20px;
+        border: none;
+        border-radius: 999px;
+        background: rgba(23,66,60,0.08);
+        color: var(--brand);
+        font-weight: 700;
+        font-size: 0.9rem;
+        cursor: pointer;
+        transition: opacity 0.15s;
+      }
+      .btn-ghost:hover { opacity: 0.75; }
+      .status-msg {
+        padding: 10px 14px;
+        border-radius: 10px;
+        font-size: 0.88rem;
+        font-weight: 500;
+      }
+      .status-ok { background: #e8f4f0; color: var(--brand); }
+      .status-err { background: #fdecea; color: #c0392b; }
+      .hidden { display: none !important; }
+      .passphrase-input {
+        display: block;
+        width: 100%;
+        padding: 11px 14px;
+        border: 1.5px solid rgba(23,66,60,0.2);
+        border-radius: 12px;
+        font-size: 1rem;
+        background: rgba(23,66,60,0.04);
+        outline: none;
+        transition: border-color 0.15s;
+        font-family: inherit;
+      }
+      .passphrase-input:focus { border-color: var(--brand); }
+      .passphrase-show-label {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-top: 10px;
+        font-size: 0.84rem;
+        color: #666;
+        cursor: pointer;
+        user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>📊 Excel → JSON 轉換工具</h1>
+        <p>將價格表 Excel 檔轉換為售價速查表可讀取的 JSON 格式</p>
+      </header>
+
+      <!-- Step 1: 選擇檔案 -->
+      <div class="card">
+        <h2>Step 1：選擇 Excel 檔案</h2>
+        <label class="drop-zone" id="drop-zone">
+          <input type="file" id="file-input" accept=".xlsx,.xls,.csv" />
+          <div class="drop-zone-icon">📂</div>
+          <p><strong>點此選擇</strong>或拖放 Excel 檔案到這裡</p>
+          <p style="margin-top:6px; font-size:0.8rem; color:#999;">支援 .xlsx / .xls / .csv</p>
+        </label>
+        <div id="status-msg" class="status-msg hidden"></div>
+      </div>
+
+      <!-- 欄位對應說明 -->
+      <div class="card">
+        <h2>欄位對應規則</h2>
+        <table class="field-map-table">
+          <thead>
+            <tr>
+              <th>Excel 欄位名稱</th>
+              <th>輸出 JSON 欄位</th>
+              <th>用途</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>料號</td><td><span class="tag tag-sku">型號</span></td><td>主要搜尋 SKU</td></tr>
+            <tr><td>品名</td><td>中文品名</td><td>顯示名稱</td></tr>
+            <tr><td>建議售價</td><td>建議售價</td><td>定價</td></tr>
+            <tr><td>A</td><td>底價</td><td>底價（A 欄）</td></tr>
+            <tr><td>B</td><td>量價</td><td>量價（B 欄）</td></tr>
+            <tr><td>C</td><td>開盤價</td><td>開盤價（C 欄）</td></tr>
+            <tr><td>搭贈1</td><td>搭贈</td><td>搭贈資訊</td></tr>
+            <tr><td>備註</td><td>備註</td><td>補充資訊</td></tr>
+            <tr><td>原始查詢型號</td><td><span class="tag tag-skip">略過</span></td><td>不匯入</td></tr>
+            <tr><td>單入長(cm) + 單入寬(cm) + 單入高(cm)</td><td>單入尺寸(cm)</td><td>自動合併為 A x B x C</td></tr>
+            <tr><td>外箱長度(cm) + 外箱寬度(cm) + 外箱高度(cm)</td><td>外箱尺寸(cm)</td><td>自動合併為 A x B x C</td></tr>
+            <tr><td>其他所有欄位</td><td><span class="tag tag-extra">保留原名</span></td><td>顯示在細節頁面</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Step 2: 統計 & 預覽（解析後顯示） -->
+      <div class="card hidden" id="result-card">
+        <h2>Step 2：解析結果</h2>
+        <div class="stats" id="stats"></div>
+        <div style="margin-top:16px;">
+          <p style="font-size:0.85rem; color:#666; margin-bottom:8px;">前 10 筆預覽（主要欄位）：</p>
+          <div class="preview-table-wrapper">
+            <table class="preview-table" id="preview-table"></table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 2.5: 加密密碼 -->
+      <div class="card hidden" id="passphrase-card">
+        <h2>Step 2.5：設定加密密碼（選填）</h2>
+        <p style="font-size:0.88rem; color:#555; margin-bottom:14px;">
+          設定後，整份 JSON 將以 AES-256-GCM 加密輸出，任何文字編輯器都無法讀取內容。<br>
+          若留空，輸出一般明文 JSON。
+        </p>
+        <input
+          type="password"
+          id="passphrase-input"
+          class="passphrase-input"
+          placeholder="輸入加密密碼（留空 = 不加密）"
+          autocomplete="off"
+        />
+        <label class="passphrase-show-label">
+          <input type="checkbox" id="show-passphrase" />
+          顯示密碼
+        </label>
+      </div>
+
+      <!-- Step 3: 下載 -->
+      <div class="card hidden" id="download-card">
+        <h2>Step 3：下載 JSON</h2>
+        <p style="font-size:0.88rem; color:#555; margin-bottom:14px;">
+          下載後，在售價速查表點「<strong>更多選項 → 載入 JSON</strong>」匯入即可。
+        </p>
+        <div class="actions">
+          <button class="btn-primary" id="download-btn" disabled>⬇ 下載 JSON 檔案</button>
+          <button class="btn-ghost" id="reset-btn">重新選擇</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+    <script>
+      // ── 欄位對應表 ──────────────────────────────────────────────
+      const FIELD_MAP = {
+        "料號":     "型號",
+        "品名":     "中文品名",
+        "建議售價": "建議售價",
+        "A":        "底價",
+        "B":        "量價",
+        "C":        "開盤價",
+        "搭贈1":    "搭贈",
+        "備註":     "備註",
+      };
+      const SKIP_FIELDS = new Set(["原始查詢型號"]);
+
+      // ── 尺寸欄位合併規則 ─────────────────────────────────────────
+      // 將獨立的長/寬/高欄位合併成 "A x B x C" 格式
+      const DIMENSION_MERGE_RULES = [
+        {
+          inputs: ["單入長(cm)", "單入寬(cm)", "單入高(cm)"],
+          output: "單入尺寸(cm)",
+        },
+        {
+          inputs: ["外箱長度(cm)", "外箱寬度(cm)", "外箱高度(cm)"],
+          output: "外箱尺寸(cm)",
+        },
+      ];
+
+      function applyDimensionMerge(out) {
+        for (const rule of DIMENSION_MERGE_RULES) {
+          const vals = rule.inputs.map(k => out[k]).filter(v => v !== undefined && v !== "");
+          if (vals.length === rule.inputs.length) {
+            // 全部有值 → 合併後刪除原始欄位
+            out[rule.output] = vals.join(" x ");
+            rule.inputs.forEach(k => delete out[k]);
+          }
+          // 若部分欄位有值但不完整，保留原始欄位
+        }
+        return out;
+      }
+      const PREVIEW_COLS = ["型號", "中文品名", "建議售價", "底價", "量價", "開盤價", "搭贈"];
+
+      let parsedData = null;
+      let outputFileName = "price-data.json";
+
+      // ── DOM refs ──────────────────────────────────────────────
+      const fileInput        = document.querySelector("#file-input");
+      const dropZone         = document.querySelector("#drop-zone");
+      const statusMsg        = document.querySelector("#status-msg");
+      const resultCard       = document.querySelector("#result-card");
+      const passphraseCard   = document.querySelector("#passphrase-card");
+      const passphraseInput  = document.querySelector("#passphrase-input");
+      const showPassphrase   = document.querySelector("#show-passphrase");
+      const downloadCard     = document.querySelector("#download-card");
+      const statsEl          = document.querySelector("#stats");
+      const previewTable     = document.querySelector("#preview-table");
+      const downloadBtn      = document.querySelector("#download-btn");
+      const resetBtn         = document.querySelector("#reset-btn");
+
+      // ── 拖放事件 ──────────────────────────────────────────────
+      dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
+      dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+      dropZone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropZone.classList.remove("dragover");
+        const file = e.dataTransfer?.files?.[0];
+        if (file) processFile(file);
+      });
+      fileInput.addEventListener("change", () => {
+        if (fileInput.files?.[0]) processFile(fileInput.files[0]);
+      });
+      downloadBtn.addEventListener("click", downloadJson);
+      resetBtn.addEventListener("click", resetAll);
+      showPassphrase?.addEventListener("change", () => {
+        passphraseInput.type = showPassphrase.checked ? "text" : "password";
+      });
+
+      // ── 主要處理邏輯 ──────────────────────────────────────────
+      async function processFile(file) {
+        showStatus("正在讀取 " + file.name + "...", false);
+        outputFileName = file.name.replace(/\.[^.]+$/, "") + ".json";
+        try {
+          const buffer = await file.arrayBuffer();
+          const wb = XLSX.read(buffer, { type: "array" });
+          const sheetName = wb.SheetNames[0];
+          const ws = wb.Sheets[sheetName];
+          const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+
+          if (!rows.length) throw new Error("工作表沒有資料");
+
+          parsedData = rows
+            .filter(row => {
+              // 過濾掉完全空白的列
+              return Object.values(row).some(v => String(v).trim() !== "");
+            })
+            .map(row => {
+              const out = {};
+              for (const [col, val] of Object.entries(row)) {
+                if (SKIP_FIELDS.has(col)) continue;
+                const mappedKey = FIELD_MAP[col] || col;
+                const strVal = val === null || val === undefined ? "" : String(val).trim();
+                if (strVal !== "") out[mappedKey] = strVal;
+              }
+              applyDimensionMerge(out);
+              return out;
+            })
+            .filter(row => row["型號"]); // 必須有型號
+
+          if (!parsedData.length) throw new Error("沒有找到含「料號」的有效資料列");
+
+          showStatus(`✓ 成功解析 ${parsedData.length} 筆資料`, false);
+          renderStats(parsedData, rows.length);
+          renderPreview(parsedData);
+          resultCard.classList.remove("hidden");
+          passphraseCard.classList.remove("hidden");
+          downloadCard.classList.remove("hidden");
+          downloadBtn.disabled = false;
+        } catch (err) {
+          showStatus("❌ 解析失敗：" + err.message, true);
+          parsedData = null;
+        }
+      }
+
+      function renderStats(data, totalRows) {
+        const extraCols = new Set();
+        data.forEach(row => {
+          Object.keys(row).forEach(k => {
+            if (!Object.values(FIELD_MAP).includes(k) && k !== "型號") extraCols.add(k);
+          });
+        });
+        statsEl.innerHTML = `
+          <div class="stat"><div class="stat-label">有效筆數</div><div class="stat-value">${data.length}</div></div>
+          <div class="stat"><div class="stat-label">額外欄位數</div><div class="stat-value">${extraCols.size}</div></div>
+          <div class="stat"><div class="stat-label">原始列數</div><div class="stat-value">${totalRows}</div></div>
+        `;
+      }
+
+      function renderPreview(data) {
+        const preview = data.slice(0, 10);
+        const thead = `<thead><tr>${PREVIEW_COLS.map(c => `<th>${c}</th>`).join("")}</tr></thead>`;
+        const tbody = `<tbody>${preview.map(row =>
+          `<tr>${PREVIEW_COLS.map(c => `<td title="${escapeHtml(row[c] || "")}">${escapeHtml(String(row[c] || "-"))}</td>`).join("")}</tr>`
+        ).join("")}</tbody>`;
+        previewTable.innerHTML = thead + tbody;
+      }
+
+      // ── Web Crypto 工具 ──────────────────────────────────────
+      function uint8ArrayToBase64(arr) {
+        // 分批處理以避免超過 call stack 限制
+        let binary = "";
+        const chunkSize = 8192;
+        for (let i = 0; i < arr.length; i += chunkSize) {
+          binary += String.fromCharCode(...arr.subarray(i, i + chunkSize));
+        }
+        return btoa(binary);
+      }
+
+      async function deriveEncryptKey(passphrase, saltBytes) {
+        const enc = new TextEncoder();
+        const km = await crypto.subtle.importKey(
+          "raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]
+        );
+        return crypto.subtle.deriveKey(
+          { name: "PBKDF2", salt: saltBytes, iterations: 100000, hash: "SHA-256" },
+          km, { name: "AES-GCM", length: 256 }, false, ["encrypt"]
+        );
+      }
+
+      async function encryptData(plaintext, key, ivBytes) {
+        const enc = new TextEncoder();
+        return crypto.subtle.encrypt({ name: "AES-GCM", iv: ivBytes }, key, enc.encode(plaintext));
+      }
+
+      // ── 下載 JSON ──────────────────────────────────────────
+      async function downloadJson() {
+        if (!parsedData) return;
+        downloadBtn.disabled = true;
+        try {
+          const passphrase = passphraseInput?.value.trim() || "";
+          let outputObj;
+          if (passphrase) {
+            showStatus("正在加密…", false);
+            const salt = crypto.getRandomValues(new Uint8Array(16));
+            const iv   = crypto.getRandomValues(new Uint8Array(12));
+            const key  = await deriveEncryptKey(passphrase, salt);
+            const cipher = await encryptData(JSON.stringify(parsedData), key, iv);
+            outputObj = {
+              _v: 2,
+              _salt: uint8ArrayToBase64(salt),
+              _iv:   uint8ArrayToBase64(iv),
+              data:  uint8ArrayToBase64(new Uint8Array(cipher)),
+            };
+          } else {
+            outputObj = parsedData;
+          }
+          const json = JSON.stringify(outputObj, null, 2);
+          const blob = new Blob([json], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = outputFileName;
+          a.click();
+          URL.revokeObjectURL(url);
+          const note = passphrase ? "（已加密）" : "";
+          showStatus(`✓ 已下載 ${outputFileName}${note}（${parsedData.length} 筆）`, false);
+        } catch (err) {
+          showStatus("❌ 下載失敗：" + err.message, true);
+        } finally {
+          downloadBtn.disabled = false;
+        }
+      }
+
+      function resetAll() {
+        parsedData = null;
+        fileInput.value = "";
+        resultCard.classList.add("hidden");
+        passphraseCard.classList.add("hidden");
+        downloadCard.classList.add("hidden");
+        downloadBtn.disabled = true;
+        statusMsg.classList.add("hidden");
+        if (passphraseInput) { passphraseInput.value = ""; passphraseInput.type = "password"; }
+        if (showPassphrase) showPassphrase.checked = false;
+      }
+
+      function showStatus(msg, isError) {
+        statusMsg.textContent = msg;
+        statusMsg.className = "status-msg " + (isError ? "status-err" : "status-ok");
+      }
+
+      function escapeHtml(text) {
+        return String(text)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+    </script>
+  </body>
+</html>

@@ -159,6 +159,16 @@ button {
   word-break: break-word;
 }
 
+.app-version {
+  font-size: 0.62rem;
+  color: var(--muted);
+  opacity: 0.45;
+  letter-spacing: 0.02em;
+  text-align: right;
+  line-height: 1;
+  user-select: none;
+}
+
 .hero {
   display: grid;
   gap: 16px;
@@ -296,6 +306,54 @@ button {
   flex-wrap: wrap;
   justify-content: flex-end;
   min-width: 0;
+}
+
+.panel-more-options {
+  position: relative;
+}
+
+.panel-more-options > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.panel-more-options > summary::-webkit-details-marker {
+  display: none;
+}
+
+.panel-more-options > summary::after {
+  content: " ▾";
+  font-size: 0.75em;
+}
+
+.panel-more-options[open] > summary::after {
+  content: " ▴";
+}
+
+.panel-more-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 100;
+  min-width: 160px;
+  background: var(--surface);
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(23, 66, 60, 0.16);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.panel-more-menu > button {
+  width: 100%;
+  text-align: left;
+  border-radius: 10px;
+  justify-content: flex-start;
+  min-height: 40px;
+  padding: 0 14px;
+  font-size: 0.9rem;
 }
 
 .primary-button,
@@ -665,6 +723,28 @@ body.detail-open .mobile-dock {
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.74);
   border: 1px solid rgba(23, 66, 60, 0.08);
+  transition: background 0.15s, transform 0.12s;
+}
+
+.detail-item-copyable {
+  cursor: pointer;
+  position: relative;
+}
+
+.detail-item-copyable:hover {
+  background: var(--brand-soft);
+}
+
+.detail-item-copyable:active {
+  transform: scale(0.97);
+  background: rgba(23, 66, 60, 0.12);
+}
+
+/* 複製提示小圖示 */
+.detail-item-copyable .detail-item-label::after {
+  content: " ⎘";
+  font-size: 0.75em;
+  opacity: 0.45;
 }
 
 .detail-item-label {
@@ -1050,6 +1130,209 @@ body.detail-open .mobile-dock {
   .preview-frame {
     padding: 10px;
   }
+}
+
+/* ── PIN Dialog ────────────────────────────────────────────── */
+.pin-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 31, 28, 0.55);
+  backdrop-filter: blur(6px);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.pin-overlay.is-visible {
+  opacity: 1;
+}
+
+.pin-dialog {
+  background: var(--surface-strong);
+  border-radius: var(--radius-xl);
+  padding: 28px 24px 22px;
+  width: min(340px, 92vw);
+  box-shadow: 0 24px 56px rgba(16, 31, 28, 0.22);
+  transform: translateY(12px) scale(0.97);
+  transition: transform 0.2s, opacity 0.2s;
+  opacity: 0;
+}
+
+.pin-overlay.is-visible .pin-dialog {
+  transform: none;
+  opacity: 1;
+}
+
+.pin-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+#pin-dialog-title {
+  margin: 4px 0 14px;
+  font-size: 1.3rem;
+}
+
+.pin-manage-icon {
+  background: none;
+  border: none;
+  color: var(--muted);
+  opacity: 0.3;
+  font-size: 1rem;
+  padding: 4px 2px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  line-height: 1;
+}
+.pin-manage-icon:hover { opacity: 0.65; }
+
+.pin-remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 0.84rem;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.pin-hint {
+  margin: 0 0 14px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.pin-input {
+  display: block;
+  width: 100%;
+  padding: 12px 16px;
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(23, 66, 60, 0.04);
+  font-size: 1.1rem;
+  letter-spacing: 0.2em;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.pin-input:focus {
+  border-color: var(--brand);
+}
+
+.pin-error {
+  margin: 8px 0 0;
+  color: #c0392b;
+  font-size: 0.83rem;
+  font-weight: 600;
+}
+
+.pin-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+  justify-content: flex-end;
+}
+
+/* ── Field Settings Panel ──────────────────────────────────── */
+.field-settings-sheet {
+  /* overrides for the settings drawer */
+  max-height: 80vh;
+}
+
+.field-settings-hint {
+  margin: 0 0 14px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.field-settings-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fs-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(23, 66, 60, 0.04);
+  user-select: none;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.fs-row.dragging {
+  opacity: 0.35;
+  background: rgba(23, 66, 60, 0.08);
+}
+
+.fs-row.drag-over {
+  background: var(--brand-soft);
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+
+.fs-handle {
+  font-size: 1.1rem;
+  color: var(--muted);
+  cursor: grab;
+  touch-action: none;
+  padding: 2px 4px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.fs-handle:active {
+  cursor: grabbing;
+}
+
+.fs-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.fs-label span:not(.fs-tag) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fs-check {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+.fs-tag {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(23, 66, 60, 0.09);
+  color: var(--muted);
+  flex-shrink: 0;
 }
 
 @media (max-width: 420px) {

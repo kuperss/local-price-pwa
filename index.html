@@ -11,10 +11,10 @@
       content="本機優先的價格表查詢 PWA，PDF 不上傳，索引只保存在裝置端。"
     />
     <meta name="theme-color" content="#17423c" />
-    <link rel="manifest" href="./manifest.webmanifest?v=48" />
-    <link rel="icon" href="./assets/icon.svg?v=48" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="./assets/icon.svg?v=48" />
-    <link rel="stylesheet" href="./styles.css?v=48" />
+    <link rel="manifest" href="./manifest.webmanifest?v=49" />
+    <link rel="icon" href="./assets/icon.svg?v=49" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./assets/icon.svg?v=49" />
+    <link rel="stylesheet" href="./styles.css?v=49" />
     <title>售價速查表</title>
   </head>
   <body>
@@ -30,6 +30,7 @@
         <div class="app-bar-side">
           <span class="app-mode-pill">本機模式</span>
           <p id="app-doc-label" class="app-doc-label">尚未載入價格表</p>
+          <span class="app-version"></span>
         </div>
       </header>
 
@@ -57,20 +58,32 @@
               <button id="import-button" class="primary-button" type="button">
                 載入 PDF
               </button>
-              <button id="clear-button" class="ghost-button" type="button">
-                清除本機資料
-              </button>
-              <button
-                id="install-button"
-                class="ghost-button hidden"
-                type="button"
-              >
-                安裝到主畫面
-              </button>
+              <details class="panel-more-options">
+                <summary class="ghost-button" type="button">更多選項</summary>
+                <div class="panel-more-menu">
+                  <button id="json-import-button" class="ghost-button" type="button">
+                    載入 JSON
+                  </button>
+                  <button id="settings-button" class="ghost-button" type="button">
+                    欄位設定 ⚙️
+                  </button>
+                  <button id="clear-button" class="ghost-button" type="button">
+                    清除本機資料
+                  </button>
+                  <button
+                    id="install-button"
+                    class="ghost-button hidden"
+                    type="button"
+                  >
+                    安裝到主畫面
+                  </button>
+                </div>
+              </details>
             </div>
           </div>
 
           <input id="file-input" type="file" accept="application/pdf" hidden />
+          <input id="json-file-input" type="file" accept=".json" hidden />
 
           <form id="search-form" class="search-shell">
             <label class="search-label" for="search-input">可搜尋型號、中文品名、關鍵字或其他資訊</label>
@@ -158,7 +171,7 @@
           <div id="copy-actions" class="copy-actions"></div>
         </div>
 
-        <div class="preview-zone">
+        <div id="preview-zone" class="preview-zone">
           <div class="preview-head">
             <div>
               <p class="section-label">PDF 原頁</p>
@@ -180,6 +193,73 @@
       </aside>
     </div>
 
-    <script type="module" src="./app.js?v=48"></script>
+    <!-- 解鎖對話框（隱形入口） -->
+    <div id="pin-overlay" class="pin-overlay hidden" aria-hidden="true">
+      <div class="pin-dialog" role="dialog" aria-labelledby="pin-dialog-title">
+        <!-- 標題 + 低對比管理按鈕 -->
+        <div class="pin-dialog-header">
+          <div>
+            <p class="section-label" id="pin-dialog-label">加密價格表</p>
+            <h2 id="pin-dialog-title">解鎖價格表</h2>
+          </div>
+          <button id="pin-manage-btn" class="pin-manage-icon" type="button" title="管理密碼">⚙</button>
+        </div>
+        <p id="pin-dialog-hint" class="pin-hint"></p>
+
+        <!-- 解鎖區 -->
+        <div id="pin-unlock-section">
+          <input
+            id="pin-input"
+            class="pin-input"
+            type="password"
+            inputmode="text"
+            maxlength="64"
+            autocomplete="off"
+            placeholder="輸入密碼"
+          />
+          <p id="pin-error" class="pin-error hidden">密碼錯誤，請再試一次</p>
+          <label class="pin-remember">
+            <input type="checkbox" id="pin-remember" checked />
+            記住密碼（僅存於本機）
+          </label>
+          <div class="pin-actions">
+            <button id="pin-cancel" class="ghost-button" type="button">取消</button>
+            <button id="pin-confirm" class="primary-button" type="button">確認</button>
+          </div>
+        </div>
+
+        <!-- 管理區（預設隱藏）-->
+        <div id="pin-manage-section" class="hidden">
+          <p class="pin-hint">修改本機記憶的密碼，或清除記憶。<br>注意：此操作不影響 JSON 檔案的加密。</p>
+          <input id="pin-new-input" class="pin-input" type="password" placeholder="輸入新密碼" autocomplete="off" />
+          <div class="pin-actions">
+            <button id="pin-clear-saved" class="ghost-button" type="button">清除記憶</button>
+            <button id="pin-save-new" class="primary-button" type="button">儲存新密碼</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 欄位設定抽屜 -->
+    <div id="field-settings-overlay" class="detail-overlay hidden" aria-hidden="true">
+      <div id="field-settings-backdrop" class="detail-backdrop"></div>
+      <aside id="field-settings-sheet" class="detail-sheet field-settings-sheet" aria-label="欄位顯示設定">
+        <div class="detail-handle"></div>
+        <div class="detail-head">
+          <div>
+            <p class="section-label">細節頁面</p>
+            <h2>欄位顯示設定</h2>
+          </div>
+          <button id="field-settings-close" class="icon-button" type="button" aria-label="關閉">✕</button>
+        </div>
+        <p class="field-settings-hint">拖動 ☰ 調整顯示順序，打勾控制是否顯示。</p>
+        <ul id="field-settings-list" class="field-settings-list"></ul>
+        <div class="copy-zone">
+          <button id="field-settings-reset" class="ghost-button" type="button" style="width:100%">重置為預設順序</button>
+        </div>
+      </aside>
+    </div>
+
+    <script type="module" src="./app.js?v=49"></script>
   </body>
 </html>
