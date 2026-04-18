@@ -390,6 +390,17 @@ async function activateBundleFromJson(bundle) {
   await syncDetailFieldConfig(state.entries);
   applySearch(state.searchTerm);
   renderShell();
+  // 加密 bundle：有儲存密碼就自動解鎖，不需要手勢
+  if (bundle.protConfig) {
+    const saved = await getValue(UNLOCK_PASSPHRASE_KEY);
+    if (saved) {
+      try {
+        await unlockBundle(saved);
+      } catch {
+        // 儲存的密碼失效（例如 JSON 已換），靜默忽略，等待手勢手動解鎖
+      }
+    }
+  }
 }
 
 async function buildBundle(fileName, arrayBuffer, hash) {
@@ -2381,19 +2392,33 @@ async function openPassphraseDialog() {
     showToast("請先載入加密格式的 JSON 價格表");
     return;
   }
+  // 已解鎖就不重複動作
+  if (state.bundle.entries?.length > 0) {
+    showToast("價格表已解鎖");
+    return;
+  }
   const saved = await getValue(UNLOCK_PASSPHRASE_KEY);
+  // 有儲存密碼 → 直接靜默解鎖，不彈對話框
+  if (saved) {
+    try {
+      await unlockBundle(saved);
+      showToast("已自動解鎖");
+      return;
+    } catch {
+      // 密碼失效（JSON 已換），繼續開啟對話框讓使用者重新輸入
+    }
+  }
+  // 無儲存密碼 → 顯示對話框
   refs.pinDialogTitle.textContent = "解鎖價格表";
-  refs.pinDialogHint.textContent  = saved
-    ? "已儲存密碼，直接確認即可。"
-    : "輸入轉換時設定的密碼。";
-  refs.pinInput.value = saved || "";
+  refs.pinDialogHint.textContent  = "輸入轉換時設定的密碼。";
+  refs.pinInput.value = "";
   refs.pinError.classList.add("hidden");
   if (refs.pinRemember) refs.pinRemember.checked = true;
   setManageMode(false);
   refs.pinOverlay.classList.remove("hidden");
   refs.pinOverlay.setAttribute("aria-hidden", "false");
   window.requestAnimationFrame(() => refs.pinOverlay.classList.add("is-visible"));
-  if (!saved) refs.pinInput.focus();
+  refs.pinInput.focus();
 }
 
 function closePinDialog() {
