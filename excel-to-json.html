@@ -261,6 +261,21 @@
 
     <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
     <script>
+      // ── V3 加密常數（與 PWA app.js 必須相同）────────────────────
+      const APP_SECRET = "v3-rL9mK7pXnB2qT4aE1hW8sC0dF6jUzY5";
+      const ALPHA = "zQLpcmK3nR9xB2vT6aE1hG7wUj4oYsC5dNfXiF0IuOMlHePJrVqDbWZASgyk8t_-";
+
+      function toAlpha(bytes) {
+        let result = "", buf = 0, bits = 0;
+        for (const byte of bytes) {
+          buf = (buf << 8) | byte;
+          bits += 8;
+          while (bits >= 6) { bits -= 6; result += ALPHA[(buf >> bits) & 63]; }
+        }
+        if (bits > 0) result += ALPHA[(buf << (6 - bits)) & 63];
+        return result;
+      }
+
       // ── 欄位對應表 ──────────────────────────────────────────────
       const FIELD_MAP = {
         "料號":     "型號",
@@ -406,30 +421,24 @@
       }
 
       // ── Web Crypto 工具 ──────────────────────────────────────
-      function uint8ArrayToBase64(arr) {
-        // 分批處理以避免超過 call stack 限制
-        let binary = "";
-        const chunkSize = 8192;
-        for (let i = 0; i < arr.length; i += chunkSize) {
-          binary += String.fromCharCode(...arr.subarray(i, i + chunkSize));
-        }
-        return btoa(binary);
-      }
-
-      async function deriveEncryptKey(passphrase, saltBytes) {
+      async function v3Encrypt(jsonStr, passphrase) {
         const enc = new TextEncoder();
+        const salt = crypto.getRandomValues(new Uint8Array(16));
+        const iv   = crypto.getRandomValues(new Uint8Array(12));
         const km = await crypto.subtle.importKey(
-          "raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]
+          "raw", enc.encode(passphrase + "|" + APP_SECRET), "PBKDF2", false, ["deriveBits"]
         );
-        return crypto.subtle.deriveKey(
-          { name: "PBKDF2", salt: saltBytes, iterations: 100000, hash: "SHA-256" },
-          km, { name: "AES-GCM", length: 256 }, false, ["encrypt"]
+        const masterBuf = await crypto.subtle.deriveBits(
+          { name: "PBKDF2", salt, iterations: 147293, hash: "SHA-256" }, km, 512
         );
-      }
-
-      async function encryptData(plaintext, key, ivBytes) {
-        const enc = new TextEncoder();
-        return crypto.subtle.encrypt({ name: "AES-GCM", iv: ivBytes }, key, enc.encode(plaintext));
+        const master = new Uint8Array(masterBuf);
+        const K_aes = await crypto.subtle.importKey("raw", master.slice(0, 32), "AES-GCM", false, ["encrypt"]);
+        const K_xor = master.slice(32, 64);
+        const cipherBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, K_aes, enc.encode(jsonStr));
+        const cipher = new Uint8Array(cipherBuf);
+        const xored = new Uint8Array(cipher.length);
+        for (let i = 0; i < cipher.length; i++) xored[i] = cipher[i] ^ K_xor[i % 32];
+        return { r: toAlpha(xored), q: toAlpha(salt), p: toAlpha(iv) };
       }
 
       // ── 下載 JSON ──────────────────────────────────────────
@@ -441,16 +450,7 @@
           let outputObj;
           if (passphrase) {
             showStatus("正在加密…", false);
-            const salt = crypto.getRandomValues(new Uint8Array(16));
-            const iv   = crypto.getRandomValues(new Uint8Array(12));
-            const key  = await deriveEncryptKey(passphrase, salt);
-            const cipher = await encryptData(JSON.stringify(parsedData), key, iv);
-            outputObj = {
-              _v: 2,
-              _salt: uint8ArrayToBase64(salt),
-              _iv:   uint8ArrayToBase64(iv),
-              data:  uint8ArrayToBase64(new Uint8Array(cipher)),
-            };
+            outputObj = await v3Encrypt(JSON.stringify(parsedData), passphrase);
           } else {
             outputObj = parsedData;
           }

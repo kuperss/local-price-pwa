@@ -309,8 +309,12 @@ async function onJsonFileSelected(event) {
       if (jsonData.length === 0) throw new Error("JSON 格式錯誤，請確認為非空陣列格式。");
       rawEntries = jsonData;
     } else if (jsonData._v === 2 && jsonData.data) {
-      // 新格式：加密 wrapper
-      protConfig = { salt: jsonData._salt, iv: jsonData._iv, data: jsonData.data };
+      // v2 格式（舊版相容）
+      protConfig = { _v: 2, salt: jsonData._salt, iv: jsonData._iv, data: jsonData.data };
+      rawEntries = [];
+    } else if (jsonData.r && jsonData.q && jsonData.p && typeof jsonData.r === "string") {
+      // v3 格式：多層混淆加密
+      protConfig = { _v: 3, r: jsonData.r, q: jsonData.q, p: jsonData.p };
       rawEntries = [];
     } else {
       throw new Error("JSON 格式錯誤，請確認為正確格式。");
@@ -2325,6 +2329,44 @@ async function copyField(entry, key) {
 
 // ── Web Crypto 工具 ──────────────────────────────────────────
 
+// V3 加密常數（與 excel-to-json.html 必須相同）
+const V3_APP_SECRET = "v3-rL9mK7pXnB2qT4aE1hW8sC0dF6jUzY5";
+const V3_ALPHA = "zQLpcmK3nR9xB2vT6aE1hG7wUj4oYsC5dNfXiF0IuOMlHePJrVqDbWZASgyk8t_-";
+
+function fromAlpha(str) {
+  const lookup = {};
+  for (let i = 0; i < V3_ALPHA.length; i++) lookup[V3_ALPHA[i]] = i;
+  let buf = 0, bits = 0;
+  const out = [];
+  for (const ch of str) {
+    if (!(ch in lookup)) continue;
+    buf = (buf << 6) | lookup[ch];
+    bits += 6;
+    if (bits >= 8) { bits -= 8; out.push((buf >> bits) & 255); }
+  }
+  return new Uint8Array(out);
+}
+
+async function unlockV3(passphrase, cfg) {
+  const enc = new TextEncoder();
+  const xored = fromAlpha(cfg.r);
+  const salt  = fromAlpha(cfg.q);
+  const iv    = fromAlpha(cfg.p);
+  const km = await crypto.subtle.importKey(
+    "raw", enc.encode(passphrase + "|" + V3_APP_SECRET), "PBKDF2", false, ["deriveBits"]
+  );
+  const masterBuf = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations: 147293, hash: "SHA-256" }, km, 512
+  );
+  const master = new Uint8Array(masterBuf);
+  const K_aes = await crypto.subtle.importKey("raw", master.slice(0, 32), "AES-GCM", false, ["decrypt"]);
+  const K_xor = master.slice(32, 64);
+  const cipher = new Uint8Array(xored.length);
+  for (let i = 0; i < xored.length; i++) cipher[i] = xored[i] ^ K_xor[i % 32];
+  const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, K_aes, cipher);
+  return JSON.parse(new TextDecoder().decode(plainBuf));
+}
+
 function uint8ArrayToBase64(arr) {
   let binary = "";
   const chunk = 8192;
@@ -2449,12 +2491,18 @@ async function onPassphraseConfirm() {
 }
 
 async function unlockBundle(passphrase) {
-  const { salt, iv, data } = state.bundle.protConfig;
-  const saltBytes = base64ToUint8Array(salt);
-  const ivBytes   = base64ToUint8Array(iv);
-  const key = await deriveDecryptKey(passphrase, saltBytes);
-  const plain = await decryptData(base64ToUint8Array(data), key, ivBytes);
-  const rawEntries = JSON.parse(plain);
+  const cfg = state.bundle.protConfig;
+  let rawEntries;
+  if (cfg._v === 3) {
+    rawEntries = await unlockV3(passphrase, cfg);
+  } else {
+    // v2 相容
+    const saltBytes = base64ToUint8Array(cfg.salt);
+    const ivBytes   = base64ToUint8Array(cfg.iv);
+    const key = await deriveDecryptKey(passphrase, saltBytes);
+    const plain = await decryptData(base64ToUint8Array(cfg.data), key, ivBytes);
+    rawEntries = JSON.parse(plain);
+  }
   const rebuilt = buildBundleFromJson(state.bundle.fileName, rawEntries, state.bundle.hash, null);
   state.bundle.entries = rebuilt.entries;
   state.entries = rebuilt.entries;
