@@ -253,9 +253,19 @@ function bindEvents() {
   refs.dockSearch?.addEventListener("click", focusSearch);
   refs.dockClear?.addEventListener("click", clearActiveSearch);
   refs.dockFirst?.addEventListener("click", scrollToFirstResult);
+  let _ctrlBackslashLast = 0;
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !refs.detailOverlay.classList.contains("hidden")) {
       closeDetail();
+    }
+    if (event.key === "\\" && event.ctrlKey && !event.shiftKey && !event.altKey) {
+      const now = Date.now();
+      if (now - _ctrlBackslashLast < 800) {
+        _ctrlBackslashLast = 0;
+        openPassphraseDialog();
+      } else {
+        _ctrlBackslashLast = now;
+      }
     }
   });
 }
