@@ -365,6 +365,16 @@ function buildBundleFromJson(fileName, jsonData, hash, protConfig = null) {
     }
     entry.sku = entry.sku || "";
     entry.productName = entry.productName || "";
+    // 合併 extras 中的搭贈2/搭贈3 到 entry.bonus
+    const bonusExtraIdxs = entry.extras.reduce((acc, ex, i) => {
+      if (/^搭贈\d+$/.test(ex.label) && ex.value) acc.push(i);
+      return acc;
+    }, []);
+    if (bonusExtraIdxs.length > 0) {
+      const parts = [entry.bonus, ...bonusExtraIdxs.map(i => entry.extras[i].value)].filter(Boolean);
+      entry.bonus = parts.join(" / ");
+      entry.extras = entry.extras.filter((_, i) => !bonusExtraIdxs.includes(i));
+    }
     const extrasText = entry.extras.map((e) => e.value).join(" ");
     entry.id = `json-${entry.sku || "row"}-${index}`;
     entry.searchText = normalizeForCompare(

@@ -314,6 +314,15 @@
         }
         return out;
       }
+
+      function applyBonusMerge(out) {
+        const parts = ["搭贈", "搭贈2", "搭贈3"].map(k => out[k]).filter(v => v);
+        if (parts.length === 0) return out;
+        out["搭贈"] = parts.join(" / ");
+        delete out["搭贈2"];
+        delete out["搭贈3"];
+        return out;
+      }
       const PREVIEW_COLS = ["型號", "中文品名", "建議售價", "底價", "量價", "開盤價", "搭贈"];
 
       let parsedData = null;
@@ -378,6 +387,7 @@
                 if (strVal !== "") out[mappedKey] = strVal;
               }
               applyDimensionMerge(out);
+              applyBonusMerge(out);
               return out;
             })
             .filter(row => row["型號"]); // 必須有型號
