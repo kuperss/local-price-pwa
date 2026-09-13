@@ -1,0 +1,19 @@
+{
+  "name": "展場含稅價速查",
+  "short_name": "展場價速查",
+  "description": "支援模糊關鍵字、品名與產品型號搜尋的展場含稅價 PWA。",
+  "lang": "zh-Hant-TW",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f5f9",
+  "theme_color": "#172033",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
