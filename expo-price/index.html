@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#172033" />
+  <meta name="description" content="展場含稅價快速查詢：支援模糊關鍵字、品名與產品型號搜尋，可離線使用。" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="展場價速查" />
+  <title>展場含稅價速查</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">價</span>
+        <div>
+          <h1>展場含稅價速查</h1>
+          <p>模糊關鍵字・品名・型號都能找</p>
+        </div>
+      </div>
+      <button id="installBtn" class="install-btn" type="button" aria-label="安裝到手機">安裝</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="search-panel" aria-label="產品搜尋">
+      <div class="search-wrap">
+        <svg class="search-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="m21 21-4.35-4.35m2.35-5.65a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <input id="searchInput" type="search" autocomplete="off" enterkeyhint="search" placeholder="例：TRCP30、雲朵 50W、鋁槽、E27…" aria-label="搜尋品名或型號" />
+        <button id="clearBtn" class="clear-btn" type="button" aria-label="清除搜尋">×</button>
+      </div>
+
+      <div class="quick-row" aria-label="常用搜尋">
+        <button class="quick-chip" data-query="吸頂燈" type="button">吸頂燈</button>
+        <button class="quick-chip" data-query="崁燈" type="button">崁燈</button>
+        <button class="quick-chip" data-query="軌道燈" type="button">軌道燈</button>
+        <button class="quick-chip" data-query="鋁槽" type="button">鋁槽</button>
+        <button class="quick-chip" data-query="E27" type="button">E27</button>
+        <button class="quick-chip" data-query="T5" type="button">T5</button>
+      </div>
+
+      <div id="recentRow" class="recent-row" hidden>
+        <span class="recent-label">最近：</span>
+        <div id="recentChips" class="recent-chips"></div>
+      </div>
+
+      <div class="filter-row">
+        <label class="select-wrap">
+          <span>品類</span>
+          <select id="categorySelect" aria-label="品類篩選">
+            <option value="">全部品類</option>
+          </select>
+        </label>
+        <label class="select-wrap compact">
+          <span>排序</span>
+          <select id="sortSelect" aria-label="排序方式">
+            <option value="relevance">最相關</option>
+            <option value="priceAsc">價格低到高</option>
+            <option value="priceDesc">價格高到低</option>
+            <option value="name">品名 A→Z</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <section class="summary-bar" aria-live="polite">
+      <div>
+        <strong id="resultCount">0</strong>
+        <span>筆結果</span>
+      </div>
+      <span id="offlineBadge" class="offline-badge" hidden>離線模式</span>
+    </section>
+
+    <section id="results" class="results" aria-label="搜尋結果"></section>
+    <button id="moreBtn" class="more-btn" type="button" hidden>顯示更多</button>
+
+    <section id="emptyState" class="empty-state" hidden>
+      <div class="empty-icon">⌕</div>
+      <h2>找不到符合的產品</h2>
+      <p>可試著縮短關鍵字，例如把「LED-TRCP30」改成「TRCP30」或「TRCP」。</p>
+    </section>
+
+    <p class="data-note">價格以本頁登錄之展場含稅價為準；若現場價格表有更新，請以最新版本為準。</p>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <dialog id="installDialog" class="install-dialog">
+    <form method="dialog">
+      <button class="dialog-close" aria-label="關閉">×</button>
+      <h2>加入手機主畫面</h2>
+      <p>iPhone / iPad：在 Safari 點「分享」→「加入主畫面」，之後可像 App 一樣開啟並離線查詢。</p>
+      <button class="dialog-ok" value="ok">知道了</button>
+    </form>
+  </dialog>
+
+  <script src="./data.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
