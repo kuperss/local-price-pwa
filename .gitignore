@@ -1,2 +1,11 @@
 *.pdf
 ~$*.xlsx
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+deployment.local.json
+data-private/
+.playwright-cli/
+output/
+scripts/__pycache__/

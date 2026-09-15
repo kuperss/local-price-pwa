@@ -1,4 +1,4 @@
-const CACHE_NAME = "local-price-pwa-v49";
+const CACHE_NAME = "local-price-pwa-v50-managed";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -6,6 +6,8 @@ const APP_SHELL = [
   "./app.js?v=49",
   "./manifest.webmanifest?v=49",
   "./assets/icon.svg?v=49",
+  "./managed.js",
+  "./managed.css",
   "./vendor/pdfjs/pdf.mjs",
   "./vendor/pdfjs/pdf.worker.mjs",
   "./vendor/pdfjs/LICENSE",
@@ -39,6 +41,8 @@ self.addEventListener("fetch", (event) => {
   }
 
   const requestUrl = new URL(event.request.url);
+  // Access checks, decryption keys, usage history and admin data must never enter HTTP caches.
+  if (requestUrl.pathname.startsWith('/api/') || requestUrl.pathname.startsWith('/admin')) return;
   if (requestUrl.origin === self.location.origin && requestUrl.pathname.endsWith("/name.xlsx")) {
     event.respondWith(networkFirst(event.request));
     return;

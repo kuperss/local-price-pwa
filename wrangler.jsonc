@@ -1,0 +1,24 @@
+{
+  "name": "local-price-managed",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "local-price-managed",
+      "database_id": "0cb7ed92-8cef-4be2-8395-fc2f68d42093"
+    }
+  ],
+  "vars": {
+    "ADMIN_EMAIL": "jerryloveyoux@gmail.com",
+    "ACCESS_TEAM": "https://kupers.cloudflareaccess.com",
+    "ACCESS_AUD": "83a3c03f8c652522f910bf527b5b4dbb917094c487bae5d6075066fa1f77db9c"
+  }
+}

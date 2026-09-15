@@ -8,7 +8,7 @@
     />
     <meta
       name="description"
-      content="本機優先的價格表查詢 PWA，PDF 不上傳，索引只保存在裝置端。"
+      content="裝置核准後自動更新產品料檔，支援離線價格查詢。"
     />
     <meta name="theme-color" content="#17423c" />
     <link rel="manifest" href="./manifest.webmanifest?v=49" />
@@ -16,6 +16,7 @@
     <link rel="apple-touch-icon" href="./assets/icon.svg?v=49" />
     <link rel="stylesheet" href="./styles.css?v=49" />
     <title>售價速查表</title>
+    <link rel="stylesheet" href="./managed.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -38,12 +39,12 @@
         <div class="hero-copy">
           <p class="eyebrow">Local First Tool</p>
           <h1>售價速查表</h1>
-          <p class="hero-text">本機載入 PDF，離線速查價格與快速複製。</p>
+          <p class="hero-text">自動更新料檔，離線速查價格與快速複製。</p>
         </div>
         <div class="hero-card">
           <p class="hero-card-label">目前模式</p>
           <p class="hero-card-title">單一售價表，本機匯入後會覆蓋舊版</p>
-          <p class="hero-card-text">只有本機已載入 PDF 的使用者，才看得到資料。</p>
+          <p class="hero-card-text">每台裝置經管理員核准後，才可下載與查詢。</p>
         </div>
       </header>
 
@@ -117,6 +118,7 @@
         </section>
 
         <section class="results-panel">
+          <details class="missing-panel"><summary>提交料檔中缺少的型號</summary><form id="missing-form"><label>產品型號<input name="sku" required maxlength="100" autocomplete="off"></label><label>補充說明（選填）<input name="note" maxlength="300"></label><button class="primary-button" type="submit">提交審核</button><p id="missing-status" role="status">核准後，系統會在下一次更新時查找並加入產品資料。</p></form></details>
           <div class="results-head">
             <div>
               <p class="section-label">查詢結果</p>

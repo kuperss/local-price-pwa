@@ -1,4 +1,15 @@
 import * as pdfjsLib from "./vendor/pdfjs/pdf.mjs";
+import { startManaged } from "./managed.js";
+let managed;
+let updateToastTimer;
+let searchAuditTimer;
+let auditedSearch = '';
+async function auditSearch(term) {
+  clearTimeout(searchAuditTimer);
+  if (!managed?.allowed || !term || auditedSearch === term) return;
+  auditedSearch = term;
+  await managed.event('search', { query: term, resultCount: state.filteredEntries.length });
+}
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
 
@@ -208,7 +219,38 @@ async function init() {
   updateDockState();
   registerServiceWorker();
   detectInstallPrompt();
-  await loadCachedBundle();
+  refs.importButton.hidden = true;
+  refs.jsonImportButton.hidden = true;
+  refs.clearButton.hidden = true;
+  managed = await startManaged({
+    get: getValue, set: setValue, del: deleteValue,
+    activate: async (rows, meta) => {
+      const bundle = buildBundleFromJson(`產品料檔 ${meta.fetchedAt.slice(0,10)}`, rows, meta.version);
+      await activateBundleFromJson(bundle);
+    },
+    clear: () => {
+      state.bundle = null; state.entries = []; state.filteredEntries = []; state.searchHistory = [];
+      state.selectedEntry = null; refs.searchInput.value = ''; state.searchTerm = '';
+      refs.detailGrid.replaceChildren(); refs.copyActions.replaceChildren();
+      closeDetail({immediate:true}); renderHistory(); renderResults(); renderShell();
+    },
+    status: setStatus,
+    toast: (message) => {
+      let el=document.querySelector('.update-toast');
+      if(!el){el=document.createElement('div');el.className='update-toast';el.setAttribute('role','status');document.body.append(el);}
+      el.textContent=message;el.hidden=false;clearTimeout(updateToastTimer);updateToastTimer=setTimeout(()=>{el.hidden=true;},3000);
+    }
+  });
+  const missing = document.querySelector('#missing-form');
+  missing.addEventListener('submit',async event=>{
+    event.preventDefault(); const button=missing.querySelector('button');button.disabled=true;
+    try { const code=missing.elements.sku.value.trim();
+      if(state.entries.some(e=>e.sku.toUpperCase()===code.toUpperCase())) throw new Error('這個型號已在目前料檔中。');
+      document.querySelector('#missing-status').textContent=await managed.submit(code,missing.elements.note.value.trim());
+      missing.reset();
+    }catch(error){document.querySelector('#missing-status').textContent=error.message;}
+    finally{button.disabled=false;}
+  });
 }
 
 function bindEvents() {
@@ -228,7 +270,7 @@ function bindEvents() {
   refs.fieldSettingsClose?.addEventListener("click", closeFieldSettings);
   refs.fieldSettingsBackdrop?.addEventListener("click", closeFieldSettings);
   refs.fieldSettingsReset?.addEventListener("click", resetFieldConfig);
-  bindUnlockGesture();
+  // Managed deployment uses device authorization, not the legacy import passphrase.
   refs.pinConfirm?.addEventListener("click", onPassphraseConfirm);
   refs.pinCancel?.addEventListener("click", closePinDialog);
   refs.pinOverlay?.addEventListener("click", (e) => { if (e.target === refs.pinOverlay) closePinDialog(); });
@@ -2031,10 +2073,14 @@ async function upgradeBundleIfNeeded(bundle) {
 function onSearchInput(event) {
   state.searchTerm = event.target.value.trim();
   applySearch(state.searchTerm);
+  clearTimeout(searchAuditTimer);
+  if (!state.searchTerm) auditedSearch = '';
+  else searchAuditTimer = setTimeout(() => auditSearch(state.searchTerm), 900);
 }
 
 async function onSearchSubmit(event) {
   event.preventDefault();
+  if(!managed?.allowed) return;
   const term = refs.searchInput.value.trim();
   state.searchTerm = term;
   applySearch(term);
@@ -2043,6 +2089,8 @@ async function onSearchSubmit(event) {
   if (!term) {
     return;
   }
+
+  await auditSearch(term);
 
   const nextHistory = [term, ...state.searchHistory.filter((item) => item !== term)].slice(
     0,
@@ -2192,18 +2240,20 @@ function renderHistory() {
       refs.searchInput.value = term;
       state.searchTerm = term;
       applySearch(term);
+      auditedSearch = '';
+      auditSearch(term);
     });
   });
 }
 
 function renderResults() {
   if (!state.bundle) {
-    refs.resultsTitle.textContent = "等待匯入價格表";
-    refs.resultsSubtitle.textContent = "匯入後會在本機建立索引，支援型號、中文品名與備註搜尋。";
+    refs.resultsTitle.textContent = "等待載入料檔";
+    refs.resultsSubtitle.textContent = "装置核准後自動下載，支援型號、中文品名與備註搜尋。";
     refs.emptyState.classList.remove("hidden");
-    refs.emptyState.querySelector(".empty-title").textContent = "先載入你的 PDF 價格表";
+    refs.emptyState.querySelector(".empty-title").textContent = "請先完成裝置申請";
     refs.emptyState.querySelector(".empty-text").textContent =
-      "這個 PWA 不會上傳檔案，只會把解析後的資料與原始 PDF 保存在你的裝置。";
+      "核准後會自動載入加密料檔。查詢及提交型號會留下使用紀錄。";
     refs.resultsList.innerHTML = "";
     updateDockState();
     return;
@@ -2245,7 +2295,7 @@ function renderCard(entry) {
           <p class="result-code">${escapeHtml(entry.sku || "未識別")}</p>
           ${entry.productName ? `<p class="result-name">${escapeHtml(entry.productName)}</p>` : ""}
         </div>
-        <span class="page-pill">第 ${entry.pageNumber} 頁</span>
+        <span class="page-pill">${state.bundle?.source === 'json' ? '產品料檔' : `第 ${entry.pageNumber} 頁`}</span>
       </div>
       <p class="card-note">${escapeHtml(entry.note || "無補充資訊")}</p>
       ${
@@ -2262,7 +2312,7 @@ function renderCard(entry) {
       <div class="card-footer">
         <span class="card-footer-text">點價格即可複製「型號 + 價格」</span>
         <button class="ghost-button small-button" type="button" data-open-detail="${escapeHtml(entry.id)}">
-          查看細節與 PDF
+          查看產品細節
         </button>
       </div>
     </article>
@@ -2861,6 +2911,8 @@ function commitFieldOrder(list) {
 }
 
 function openDetail(entry) {
+  if (!managed?.allowed) return;
+  managed.event('view', {sku:entry.sku});
   window.clearTimeout(detailCloseTimer);
   state.selectedEntry = entry;
   state.previewPage = entry.pageNumber;
