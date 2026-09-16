@@ -1,4 +1,18 @@
-<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>售價速查管理</title><link rel="stylesheet" href="/admin/style.css"></head><body>
-<aside><a class="brand" href="/admin/">價<span>售價速查<br><small>管理後台</small></span></a><nav><button data-page="devices" class="active">裝置與使用者</button><button data-page="events">查詢紀錄</button><button data-page="requests">型號審核</button><button data-page="catalog">更新清單</button></nav><p id="actor"></p><a href="/" target="_blank" rel="noopener">開啟查價前端 ↗</a></aside>
-<main><header><div><p class="eyebrow">售價速查管理</p><h1 id="title">裝置與使用者</h1></div><button id="refresh">重新整理</button></header><section id="summary" class="summary"></section><p id="message" role="status"></p><section class="surface"><div class="toolbar"><div id="filters"></div><span id="range"></span></div><div class="table-wrap"><table><thead id="head"></thead><tbody id="rows"></tbody></table></div><footer><button id="prev">上一頁</button><span id="page-count"></span><button id="next">下一頁</button></footer></section><p class="footnote">開啟次數＝本機成功開啟料檔的次數。搜尋在按下搜尋或停止輸入 0.9 秒後記錄，同一連續查詢不重複計數。點開產品另外記錄型號。離線紀錄在回連後補送；同名裝置各自審核。</p></main>
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>售價速查管理</title><link rel="icon" href="/assets/icon.svg" type="image/svg+xml"><link rel="stylesheet" href="/admin/style.css"></head><body>
+<aside><a class="brand" href="/admin/">價<span>售價速查<br><small>管理後台</small></span></a><nav><button data-page="devices" class="active">裝置與使用者</button><button data-page="events">查詢紀錄</button><button data-page="requests">型號審核</button><button data-page="catalog">更新清單</button><button data-page="security">成本密碼</button></nav><p id="actor"></p><a href="/" target="_blank" rel="noopener">開啟查價前端 ↗</a></aside>
+<main><header><div><p class="eyebrow">售價速查管理</p><h1 id="title">裝置與使用者</h1></div><button id="refresh">重新整理</button></header><section id="summary" class="summary"></section><p id="message" role="status"></p><section id="list-surface" class="surface"><div class="toolbar"><div id="filters"></div><span id="range"></span></div><div class="table-wrap"><table><thead id="head"></thead><tbody id="rows"></tbody></table></div><footer><button id="prev">上一頁</button><span id="page-count"></span><button id="next">下一頁</button></footer></section><section id="password-panel" class="surface security-panel" hidden>
+  <p class="eyebrow">成本獨立保護</p><h2>設定成本檢視密碼</h2>
+  <p id="password-state" role="status"></p>
+  <p>一般價格不需此密碼。使用者完成隱藏手勢後，輸入正確密碼才可查看成本。</p>
+  <form id="cost-password-form">
+    <label for="cost-password-new">新密碼</label>
+    <input id="cost-password-new" type="password" minlength="12" maxlength="128" autocomplete="new-password" required placeholder="至少 12 個字元，建議使用長密語">
+    <label for="cost-password-confirm">再次輸入新密碼</label>
+    <input id="cost-password-confirm" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+    <button class="primary" type="submit">儲存成本密碼</button>
+  </form>
+  <p class="security-note">密碼不顯示、不提供查回；忘記時可在此重設。日常料檔更新不影響已解鎖裝置。
+  變更密碼後，已連線的前端下次檢查（通常 60 秒內）會鎖回成本；離線裝置要回連才會收到變更。
+  原密碼與舊密文無法從使用者另存的副本中撤回，請勿使用短密碼。</p>
+</section><p class="footnote">開啟次數＝本機成功開啟料檔的次數。搜尋在按下搜尋或停止輸入 0.9 秒後記錄，同一連續查詢不重複計數。點開產品另外記錄型號。離線紀錄在回連後補送；同名裝置各自審核。</p></main>
 <dialog id="confirm"><form method="dialog"><h2>確認操作</h2><p id="confirm-text"></p><div class="dialog-actions"><button value="cancel">取消</button><button value="ok" class="primary">確認</button></div></form></dialog><script type="module" src="/admin/admin.js"></script></body></html>

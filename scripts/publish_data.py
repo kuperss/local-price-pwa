@@ -18,6 +18,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cloud import Cloud, ROOT, deployment
 
 BASE=ROOT.parent.parent/'價格查詢工具'/'價格查詢'
+COST_SCHEMA=[sql.strip() for sql in (ROOT/'worker/schema.sql').read_text(encoding='utf-8').split(';')
+             if sql.strip().startswith(('CREATE TABLE IF NOT EXISTS cost_bundles ', 'CREATE TABLE IF NOT EXISTS cost_chunks('))]
 def clean(code):
     return str(code).strip().replace('"','').replace('\\','').replace('/','').upper()
 def canonical(code):
@@ -73,6 +75,58 @@ def atomic(path,data):
     finally:
         if os.path.exists(tmp):os.unlink(tmp)
 
+
+def split_costs(rows):
+    prices=[];costs=[]
+    for row in rows:
+        price={};cost={'型號':str(row.get('型號',''))}
+        for k,v in row.items():
+            label=unicodedata.normalize('NFKC',k)
+            if '成本' in label or 'cost' in label.lower():
+                cost[k]=v
+            else:price[k]=v
+        prices.append(price)
+        if len(cost)>1:costs.append(cost)
+    return prices,costs
+
+def publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid=0):
+    # The scheduled job uses this checkout: create additive tables before any upload,
+    # even when the new Worker has not been deployed yet. General prices remain usable.
+    for sql in COST_SCHEMA:cloud.query(db,sql)
+    stamp=utc()
+    original=json.dumps(rows,ensure_ascii=False,separators=(',',':')).encode()
+    prices,cost_rows=split_costs(rows)
+    plain=json.dumps(prices,ensure_ascii=False,separators=(',',':')).encode()
+    # Include freshness in version so users can verify the latest daily check even if prices are unchanged.
+    version=hashlib.sha256(b'split-costs-v1\n'+fetched.encode()+b'\n'+original).hexdigest()[:32]
+    previous=cloud.query(db,"SELECT value FROM settings WHERE key='current_bundle'")
+    if previous and previous[0]['value']==version:
+        print(f'PRICE_PWA_OK unchanged version={version} products={len(rows)}');return
+    cost_key=AESGCM.generate_key(bit_length=256);cost_iv=os.urandom(12)
+    cost_plain=json.dumps(cost_rows,ensure_ascii=False,separators=(',',':')).encode()
+    cost_cipher=AESGCM(cost_key).encrypt(cost_iv,cost_plain,('costs:'+version).encode())
+    cost_encoded=base64.b64encode(cost_cipher).decode()
+    cost_chunks=[cost_encoded[i:i+80000] for i in range(0,len(cost_encoded),80000)]
+    key=AESGCM.generate_key(bit_length=256);iv=os.urandom(12);cipher=AESGCM(key).encrypt(iv,plain,version.encode())
+    encoded=base64.b64encode(cipher).decode();chunks=[encoded[i:i+80000] for i in range(0,len(encoded),80000)]
+    bundle={'format':'price-pwa-aes-gcm-v1','securityFormat':'split-costs-v1','version':version,'fetchedAt':fetched,'count':len(rows),'iv':base64.b64encode(iv).decode(),'hash':hashlib.sha256(cipher).hexdigest(),'cipher':encoded}
+    # This local .json intentionally contains no decryption key; keys require device authorization.
+    private=ROOT/'data-private';atomic(private/'price-data.json',bundle)
+    atomic(private/'publish-report.json',{'fetched_at':fetched,'products':len(rows),'approved':len(resolved)+len(missing),'invalid_seed_rows':invalid,'missing_skus':missing})
+    for i,chunk in enumerate(chunks):cloud.query(db,'INSERT OR REPLACE INTO bundle_chunks VALUES(?,?,?)',[version,i,chunk])
+    cloud.query(db,'INSERT OR REPLACE INTO bundles(version,fetched_at,published_at,product_count,key_b64,iv_b64,content_hash,chunks) VALUES(?,?,?,?,?,?,?,?)',[version,fetched,stamp,len(rows),base64.b64encode(key).decode(),bundle['iv'],bundle['hash'],len(chunks)])
+    for status,items in [('included',resolved),('missing',missing)]:
+        for start in range(0,len(items),50):
+            batch=items[start:start+50];cloud.query(db,'UPDATE catalog SET resolution=?,resolved_at=?,included_version=? WHERE sku IN ('+','.join('?' for _ in batch)+')',[status,stamp,version if status=='included' else None,*batch])
+    for i,chunk in enumerate(cost_chunks):
+        cloud.query(db,'INSERT OR REPLACE INTO cost_chunks VALUES(?,?,?)',[version,i,chunk])
+    cloud.query(db,'INSERT OR REPLACE INTO cost_bundles VALUES(?,?,?,?,?,?)',
+                [version,base64.b64encode(cost_key).decode(),base64.b64encode(cost_iv).decode(),hashlib.sha256(cost_cipher).hexdigest(),len(cost_chunks),len(cost_rows)])
+    # Publish last: interrupted upload cannot replace the last complete version.
+    cloud.query(db,"INSERT INTO settings VALUES('current_bundle',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[version])
+    print(f'PRICE_PWA_OK version={version} products={len(rows)} approved={len(resolved)+len(missing)} missing={len(missing)} fetched_at={fetched}')
+
+
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--seed',type=Path,default=BASE/'0903.xlsx');ap.add_argument('--cache',type=Path,default=BASE/'SEVICache.json.gz');ap.add_argument('--check-only',action='store_true');args=ap.parse_args()
     seeds,invalid=read_seed(args.seed)
@@ -92,26 +146,7 @@ def main():
         cloud.query(db,"INSERT OR IGNORE INTO settings VALUES('seed_initialized',?)",[stamp])
     codes=[r['sku'] for r in cloud.query(db,'SELECT sku FROM catalog ORDER BY sku')]
     rows,resolved,missing=build(payload,codes)
-    plain=json.dumps(rows,ensure_ascii=False,separators=(',',':')).encode()
-    # Include freshness in version so users can verify the latest daily check even if prices are unchanged.
-    version=hashlib.sha256(fetched.encode()+b'\n'+plain).hexdigest()[:32]
-    previous=cloud.query(db,"SELECT value FROM settings WHERE key='current_bundle'")
-    if previous and previous[0]['value']==version:
-        print(f'PRICE_PWA_OK unchanged version={version} products={len(rows)}');return
-    key=AESGCM.generate_key(bit_length=256);iv=os.urandom(12);cipher=AESGCM(key).encrypt(iv,plain,version.encode())
-    encoded=base64.b64encode(cipher).decode();chunks=[encoded[i:i+80000] for i in range(0,len(encoded),80000)]
-    bundle={'format':'price-pwa-aes-gcm-v1','version':version,'fetchedAt':fetched,'count':len(rows),'iv':base64.b64encode(iv).decode(),'hash':hashlib.sha256(cipher).hexdigest(),'cipher':encoded}
-    # This local .json intentionally contains no decryption key; keys require device authorization.
-    private=ROOT/'data-private';atomic(private/'price-data.json',bundle)
-    atomic(private/'publish-report.json',{'fetched_at':fetched,'products':len(rows),'approved':len(codes),'invalid_seed_rows':invalid,'missing_skus':missing})
-    for i,chunk in enumerate(chunks):cloud.query(db,'INSERT OR REPLACE INTO bundle_chunks VALUES(?,?,?)',[version,i,chunk])
-    cloud.query(db,'INSERT OR REPLACE INTO bundles(version,fetched_at,published_at,product_count,key_b64,iv_b64,content_hash,chunks) VALUES(?,?,?,?,?,?,?,?)',[version,fetched,stamp,len(rows),base64.b64encode(key).decode(),bundle['iv'],bundle['hash'],len(chunks)])
-    for status,items in [('included',resolved),('missing',missing)]:
-        for start in range(0,len(items),50):
-            batch=items[start:start+50];cloud.query(db,'UPDATE catalog SET resolution=?,resolved_at=?,included_version=? WHERE sku IN ('+','.join('?' for _ in batch)+')',[status,stamp,version if status=='included' else None,*batch])
-    # Publish last: interrupted upload cannot replace the last complete version.
-    cloud.query(db,"INSERT INTO settings VALUES('current_bundle',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[version])
-    print(f'PRICE_PWA_OK version={version} products={len(rows)} approved={len(codes)} missing={len(missing)} fetched_at={fetched}')
+    publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid)
 
 if __name__=='__main__':
     try:main()

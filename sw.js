@@ -1,85 +1,28 @@
-const CACHE_NAME = "local-price-pwa-v50-managed";
+const CACHE_NAME = "local-price-pwa-v51-costs";
 const APP_SHELL = [
-  "./",
-  "./index.html",
-  "./styles.css?v=49",
-  "./app.js?v=49",
-  "./manifest.webmanifest?v=49",
-  "./assets/icon.svg?v=49",
-  "./managed.js",
-  "./managed.css",
-  "./vendor/pdfjs/pdf.mjs",
-  "./vendor/pdfjs/pdf.worker.mjs",
-  "./vendor/pdfjs/LICENSE",
-  "./vendor/xlsx/xlsx.full.min.js?v=49",
-  "./vendor/xlsx/LICENSE",
+  "./", "./index.html", "./styles.css?v=51", "./app.js?v=51",
+  "./manifest.webmanifest?v=51", "./assets/icon.svg?v=51",
+  "./managed.js", "./managed.css", "./cost-crypto.js", "./cost-session.js",
 ];
-
-self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
+const SHELL_PATHS = new Set(APP_SHELL.map(path => new URL(path, self.location.href).pathname));
+self.addEventListener("install", event => {
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
   self.skipWaiting();
 });
-
-self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches
-      .keys()
-      .then((keys) =>
-        Promise.all(
-          keys
-            .filter((key) => key !== CACHE_NAME)
-            .map((key) => caches.delete(key)),
-        ),
-      )
-      .then(() => self.clients.claim()),
-  );
+self.addEventListener("activate", event => {
+  event.waitUntil(caches.keys().then(keys => Promise.all(
+    keys.filter(key => key.startsWith("local-price-pwa") && key !== CACHE_NAME).map(key => caches.delete(key))
+  )).then(() => self.clients.claim()));
 });
-
-self.addEventListener("fetch", (event) => {
-  if (event.request.method !== "GET") {
-    return;
-  }
-
-  const requestUrl = new URL(event.request.url);
-  // Access checks, decryption keys, usage history and admin data must never enter HTTP caches.
-  if (requestUrl.pathname.startsWith('/api/') || requestUrl.pathname.startsWith('/admin')) return;
-  if (requestUrl.origin === self.location.origin && requestUrl.pathname.endsWith("/name.xlsx")) {
-    event.respondWith(networkFirst(event.request));
-    return;
-  }
-
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) {
-        return cached;
-      }
-
-      return fetch(event.request).then((response) => {
-        if (!response || response.status !== 200 || response.type !== "basic") {
-          return response;
-        }
-
-        const responseClone = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseClone));
-        return response;
-      });
-    }),
-  );
-});
-
-async function networkFirst(request) {
-  try {
-    const response = await fetch(request);
-    if (response && response.status === 200 && response.type === "basic") {
-      const responseClone = response.clone();
-      caches.open(CACHE_NAME).then((cache) => cache.put(request, responseClone));
+self.addEventListener("fetch", event => {
+  const url = new URL(event.request.url);
+  // Only cache the application shell, never APIs, admin responses, documents or keys.
+  if(event.request.method !== "GET" || url.origin !== self.location.origin || !SHELL_PATHS.has(url.pathname)) return;
+  event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request).then(response => {
+    if(response.ok && response.type === "basic") {
+      const copy = response.clone();
+      event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy)));
     }
     return response;
-  } catch (error) {
-    const cached = await caches.match(request);
-    if (cached) {
-      return cached;
-    }
-    throw error;
-  }
-}
+  })));
+});

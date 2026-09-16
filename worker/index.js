@@ -1,4 +1,5 @@
 import {createRemoteJWKSet,jwtVerify} from 'jose';
+import {COST_FORMAT,validCostConfig,wrapCostKey} from '../cost-crypto.js';
 const enc=new TextEncoder();
 const json=(obj,status=200)=>Response.json(obj,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 const fail=(status,message)=>{throw Object.assign(new Error(message),{status});};
@@ -59,7 +60,7 @@ async function api(request,env,url){
  if(path==='/api/register'&&request.method==='POST') return register(request,env,data);
  if(path.startsWith('/admin/api/')) return adminApi(request,env,url,data,await admin(request,env));
  const d=await authenticate(request,env,raw);
- if(path==='/api/status') return json({id:d.id,name:d.name,status:d.status});
+ if(path==='/api/status') return json({id:d.id,name:d.name,status:d.status,approvedAt:d.approved_at});
  // Accept queued audits from revoked devices, but never send them products or keys.
  if(path==='/api/events'&&request.method==='POST'){
   if(!['approved','revoked'].includes(d.status)) fail(403,'尚未核准');
@@ -76,10 +77,28 @@ async function api(request,env,url){
  if(path==='/api/bundle'){
   const b=await env.DB.prepare("SELECT * FROM bundles WHERE version=(SELECT value FROM settings WHERE key='current_bundle')").first();
   if(!b) fail(503,'產品資料尚未發布');
-  if(url.searchParams.get('version')===b.version) return json({unchanged:true,version:b.version});
+  // Never serve legacy bundles: those included costs in the ordinary price payload.
+  const costs=await env.DB.prepare('SELECT * FROM cost_bundles WHERE version=?').bind(b.version).first();
+  if(!costs) fail(503,'料檔安全格式升級中，請聯絡管理員完成成本資料分離');
+  const configRow=await env.DB.prepare("SELECT value FROM settings WHERE key='cost_password_v1'").first();
+  const config=configRow?JSON.parse(configRow.value):null;
+  const costRevision=config?.revision||'none';
+  const unchanged=url.searchParams.get('version')===b.version;
+  let cost;
+  if(!unchanged||url.searchParams.get('costRevision')!==costRevision){
+   cost={configured:false,revision:costRevision};
+   if(config){
+    const chunks=await env.DB.prepare('SELECT content FROM cost_chunks WHERE version=? ORDER BY seq').bind(b.version).all();
+    if(chunks.results.length!==costs.chunks) fail(503,'成本資料包不完整');
+    cost={configured:true,revision:costRevision,version:b.version,salt:config.salt,iterations:config.iterations,
+      ...await wrapCostKey(costs.key_b64,b.version,config),iv:costs.iv_b64,cipher:chunks.results.map(x=>x.content).join(''),hash:costs.content_hash};
+   }
+  }
+  const security={securityFormat:COST_FORMAT,costRevision,...(cost?{cost}:{})};
+  if(unchanged) return json({unchanged:true,version:b.version,...security});
   const chunks=await env.DB.prepare('SELECT content FROM bundle_chunks WHERE version=? ORDER BY seq').bind(b.version).all();
   if(chunks.results.length!==b.chunks) fail(503,'資料包不完整');
-  return json({version:b.version,fetchedAt:b.fetched_at,count:b.product_count,key:b.key_b64,iv:b.iv_b64,hash:b.content_hash,cipher:chunks.results.map(x=>x.content).join('')});
+  return json({version:b.version,fetchedAt:b.fetched_at,count:b.product_count,key:b.key_b64,iv:b.iv_b64,hash:b.content_hash,cipher:chunks.results.map(x=>x.content).join(''),...security});
  }
  if(path==='/api/requests'&&request.method==='POST'){
   const code=sku(data.sku); if(!code||!/^[\x21-\x7e]+$/.test(code)) fail(400,'請填寫有效的產品型號');
@@ -92,6 +111,17 @@ async function api(request,env,url){
 async function adminApi(request,env,url,data,actor){
  const path=url.pathname.slice('/admin/api/'.length), offset=Math.max(0,Number.parseInt(url.searchParams.get('offset')||'0')||0);
  const log=(action,target)=>env.DB.prepare('INSERT INTO admin_audit VALUES(?,?,?,?,?)').bind(crypto.randomUUID(),actor,action,target,now());
+ if(path==='cost-password'&&request.method==='GET'){
+  const row=await env.DB.prepare("SELECT value FROM settings WHERE key='cost_password_v1'").first();
+  const config=row?JSON.parse(row.value):null;
+  return json({configured:!!config,updatedAt:config?.updatedAt||null,revision:config?.revision||null});
+ }
+ if(path==='cost-password'&&request.method==='POST'){
+  if(!validCostConfig(data)) fail(400,'成本密碼設定格式錯誤');
+  const config={salt:data.salt,iterations:data.iterations,wrappingKey:data.wrappingKey,revision:crypto.randomUUID(),updatedAt:now()};
+  await env.DB.batch([env.DB.prepare("INSERT INTO settings VALUES('cost_password_v1',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(config)),log('cost_password_changed',config.revision)]);
+  return json({ok:true,updatedAt:config.updatedAt,revision:config.revision});
+ }
  if(path==='overview') return json({actor,bundle:await env.DB.prepare("SELECT version,fetched_at,published_at,product_count FROM bundles WHERE version=(SELECT value FROM settings WHERE key='current_bundle')").first(),devices:(await env.DB.prepare('SELECT status,COUNT(*) AS n FROM devices GROUP BY status').all()).results});
  if(path==='devices'&&request.method==='GET') return json((await env.DB.prepare("SELECT d.id,d.name,d.status,d.created_at,d.approved_at,d.revoked_at,d.last_seen,d.user_agent, (SELECT COUNT(*) FROM events e WHERE e.device_id=d.id AND kind='session') AS sessions,(SELECT COUNT(*) FROM events e WHERE e.device_id=d.id AND kind='search') AS searches,(SELECT COUNT(*) FROM requests r WHERE r.device_id=d.id) AS submissions FROM devices d ORDER BY d.created_at DESC LIMIT 200 OFFSET ?").bind(offset).all()).results);
  if(path==='devices'&&request.method==='POST'){

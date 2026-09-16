@@ -8,4 +8,4 @@ deployment.local.json
 data-private/
 .playwright-cli/
 output/
-scripts/__pycache__/
+__pycache__/

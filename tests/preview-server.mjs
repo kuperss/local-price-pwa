@@ -1,0 +1,44 @@
+// LOCAL SYNTHETIC QA ONLY. In-memory DB; never connects to Cloudflare or BI.
+// Local /admin requests receive a test JWT for the synthetic owner, not production Access.
+import {createServer} from 'node:http';
+import {DatabaseSync} from 'node:sqlite';
+import {readFile} from 'node:fs/promises';
+import {resolve,sep,extname} from 'node:path';
+import {generateKeyPair,exportJWK,SignJWT} from 'jose';
+import worker from '../worker/index.js';
+const root=resolve('dist');
+const sql=new DatabaseSync(':memory:');sql.exec(await readFile('worker/schema.sql','utf8'));
+const DB={prepare(query){return {params:[],bind(...p){this.params=p;return this;},async first(){return sql.prepare(query).get(...this.params)||null;},async all(){return {results:sql.prepare(query).all(...this.params)};},async run(){const r=sql.prepare(query).run(...this.params);return {meta:{changes:Number(r.changes)}};}};},async batch(items){sql.exec('BEGIN');try{const result=await Promise.all(items.map(s=>s.run()));sql.exec('COMMIT');return result;}catch(e){sql.exec('ROLLBACK');throw e;}}};
+const version='synthetic-split-costs-1';
+const prices=[{'型號':'TEST-001','中文品名':'測試崁燈','底價':'100','量價':'120','開盤價':'150','建議售價':'200','備註':'僅供本機測試'}];
+const costs=[{'型號':'TEST-001','銷售成本':'73.21'}];
+const enc=new TextEncoder(),b64=value=>Buffer.from(value).toString('base64');
+async function seal(rows,aad){const raw=crypto.getRandomValues(new Uint8Array(32)),iv=crypto.getRandomValues(new Uint8Array(12)),key=await crypto.subtle.importKey('raw',raw,'AES-GCM',false,['encrypt']);const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode(aad)},key,enc.encode(JSON.stringify(rows)));return {key:b64(raw),iv:b64(iv),cipher:b64(cipher),hash:Buffer.from(await crypto.subtle.digest('SHA-256',cipher)).toString('hex')};}
+const main=await seal(prices,version),cost=await seal(costs,'costs:'+version);
+sql.prepare('INSERT INTO bundles VALUES(?,?,?,?,?,?,?,?)').run(version,'2026-09-15T09:00:00',new Date().toISOString(),1,main.key,main.iv,main.hash,1);
+sql.prepare('INSERT INTO bundle_chunks VALUES(?,?,?)').run(version,0,main.cipher);
+sql.prepare('INSERT INTO cost_bundles VALUES(?,?,?,?,?,?)').run(version,cost.key,cost.iv,cost.hash,1,1);
+sql.prepare('INSERT INTO cost_chunks VALUES(?,?,?)').run(version,0,cost.cipher);
+sql.prepare('INSERT INTO settings VALUES(?,?)').run('current_bundle',version);
+const pair=await generateKeyPair('RS256'),jwk={...await exportJWK(pair.publicKey),kid:'local-test',alg:'RS256'};
+let issuer;
+const ASSETS={async fetch(request){
+ const pathname=decodeURIComponent(new URL(request.url).pathname);
+ const file=resolve(root,'.'+pathname+(pathname.endsWith('/')?'index.html':''));
+ if(!file.startsWith(root+sep))return new Response('Not found',{status:404});
+ try{return new Response(await readFile(file),{headers:{'Content-Type':({'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css','.svg':'image/svg+xml','.webmanifest':'application/manifest+json'})[extname(file)]||'application/octet-stream'}});}
+ catch{return new Response('Not found',{status:404});}
+}};
+const server=createServer(async(req,res)=>{
+ try{
+  if(req.url==='/cdn-cgi/access/certs'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({keys:[jwk]}));return;}
+  const headers=new Headers();for(const [k,v] of Object.entries(req.headers))if(v)headers.set(k,Array.isArray(v)?v.join(','):v);
+  if(req.url.startsWith('/admin'))headers.set('Cf-Access-Jwt-Assertion',await new SignJWT({email:'synthetic-owner@example.test'}).setProtectedHeader({alg:'RS256',kid:jwk.kid}).setIssuedAt().setIssuer(issuer).setAudience('local-test').setExpirationTime('5m').sign(pair.privateKey));
+  const chunks=[];for await(const chunk of req)chunks.push(chunk);
+  const body=Buffer.concat(chunks);
+  const response=await worker.fetch(new Request(issuer+req.url,{method:req.method,headers,body:['GET','HEAD'].includes(req.method)?undefined:body}),{DB,ASSETS,ACCESS_TEAM:issuer,ACCESS_AUD:'local-test',ADMIN_EMAIL:'synthetic-owner@example.test'});
+  res.writeHead(response.status,Object.fromEntries(response.headers));res.end(Buffer.from(await response.arrayBuffer()));
+ }catch(error){console.error(error.message);res.writeHead(500);res.end('Synthetic preview error');}
+});
+server.listen(0,'127.0.0.1',()=>{issuer=`http://127.0.0.1:${server.address().port}`;console.log('SYNTHETIC_PREVIEW '+issuer);});
+process.on('SIGINT',()=>server.close(()=>{sql.close();process.exit(0);}));

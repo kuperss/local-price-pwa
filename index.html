@@ -11,10 +11,10 @@
       content="裝置核准後自動更新產品料檔，支援離線價格查詢。"
     />
     <meta name="theme-color" content="#17423c" />
-    <link rel="manifest" href="./manifest.webmanifest?v=49" />
-    <link rel="icon" href="./assets/icon.svg?v=49" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="./assets/icon.svg?v=49" />
-    <link rel="stylesheet" href="./styles.css?v=49" />
+    <link rel="manifest" href="./manifest.webmanifest?v=51" />
+    <link rel="icon" href="./assets/icon.svg?v=51" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./assets/icon.svg?v=51" />
+    <link rel="stylesheet" href="./styles.css?v=51" />
     <title>售價速查表</title>
     <link rel="stylesheet" href="./managed.css" />
   </head>
@@ -22,14 +22,14 @@
     <div class="app-shell">
       <header class="app-bar">
         <div class="app-bar-main">
-          <div class="app-logo" aria-hidden="true">價</div>
+          <button class="app-logo" type="button" aria-label="價">價</button>
           <div class="app-bar-copy">
             <p class="app-bar-label">本機離線</p>
             <h1 class="app-bar-title">售價速查表</h1>
           </div>
         </div>
         <div class="app-bar-side">
-          <span class="app-mode-pill">本機模式</span>
+          <button class="app-mode-pill" type="button">本機模式</button>
           <p id="app-doc-label" class="app-doc-label">尚未載入價格表</p>
           <span class="app-version"></span>
         </div>
@@ -43,7 +43,7 @@
         </div>
         <div class="hero-card">
           <p class="hero-card-label">目前模式</p>
-          <p class="hero-card-title">單一售價表，本機匯入後會覆蓋舊版</p>
+          <p class="hero-card-title">開啟時確認版本，自動更新料檔</p>
           <p class="hero-card-text">每台裝置經管理員核准後，才可下載與查詢。</p>
         </div>
       </header>
@@ -56,21 +56,13 @@
               <h2 id="document-title">尚未載入價格表</h2>
             </div>
             <div class="panel-actions">
-              <button id="import-button" class="primary-button" type="button">
-                載入 PDF
-              </button>
               <details class="panel-more-options">
                 <summary class="ghost-button" type="button">更多選項</summary>
                 <div class="panel-more-menu">
-                  <button id="json-import-button" class="ghost-button" type="button">
-                    載入 JSON
-                  </button>
                   <button id="settings-button" class="ghost-button" type="button">
                     欄位設定 ⚙️
                   </button>
-                  <button id="clear-button" class="ghost-button" type="button">
-                    清除本機資料
-                  </button>
+                  <button id="cost-lock-button" class="ghost-button hidden" type="button">鎖回成本</button>
                   <button
                     id="install-button"
                     class="ghost-button hidden"
@@ -83,8 +75,6 @@
             </div>
           </div>
 
-          <input id="file-input" type="file" accept="application/pdf" hidden />
-          <input id="json-file-input" type="file" accept=".json" hidden />
 
           <form id="search-form" class="search-shell">
             <label class="search-label" for="search-input">可搜尋型號、中文品名、關鍵字或其他資訊</label>
@@ -113,7 +103,7 @@
           </div>
 
           <div id="status-banner" class="status-banner" aria-live="polite">
-            尚未載入價格表，請先選擇本地 PDF。匯入後可用型號、中文品名與備註搜尋。
+            正在確認裝置與料檔。核准後可用型號、中文品名與備註搜尋。
           </div>
         </section>
 
@@ -122,17 +112,17 @@
           <div class="results-head">
             <div>
               <p class="section-label">查詢結果</p>
-              <h2 id="results-title">等待匯入價格表</h2>
+              <h2 id="results-title">等待載入料檔</h2>
             </div>
             <p id="results-subtitle" class="results-subtitle">
-              匯入後會在本機建立索引，支援型號、中文品名與備註搜尋。
+              料檔自動更新，支援型號、中文品名與備註搜尋。
             </p>
           </div>
 
           <div id="empty-state" class="empty-state">
-            <p class="empty-title">先載入你的 PDF 價格表</p>
+            <p class="empty-title">請先完成裝置申請</p>
             <p class="empty-text">
-              這個售價速查表不會上傳檔案，只會把解析後的資料、中文品名對應與原始 PDF 保存在你的裝置。
+              核准後會自動下載料檔，並保存在這個瀏覽器供離線查詢。
             </p>
           </div>
 
@@ -173,73 +163,26 @@
           <div id="copy-actions" class="copy-actions"></div>
         </div>
 
-        <div id="preview-zone" class="preview-zone">
-          <div class="preview-head">
-            <div>
-              <p class="section-label">PDF 原頁</p>
-              <p id="preview-label" class="preview-label">第 - 頁</p>
-            </div>
-            <div class="preview-actions">
-              <button id="preview-prev" class="ghost-button small-button" type="button">
-                上一頁
-              </button>
-              <button id="preview-next" class="ghost-button small-button" type="button">
-                下一頁
-              </button>
-            </div>
-          </div>
-          <div class="preview-frame">
-            <canvas id="preview-canvas"></canvas>
-          </div>
-        </div>
       </aside>
     </div>
 
-    <!-- 解鎖對話框（隱形入口） -->
+    <!-- 成本解鎖：入口為模式 5 次 → 價 4 次 → 模式 3 次 -->
     <div id="pin-overlay" class="pin-overlay hidden" aria-hidden="true">
-      <div class="pin-dialog" role="dialog" aria-labelledby="pin-dialog-title">
-        <!-- 標題 + 低對比管理按鈕 -->
-        <div class="pin-dialog-header">
-          <div>
-            <p class="section-label" id="pin-dialog-label">加密價格表</p>
-            <h2 id="pin-dialog-title">解鎖價格表</h2>
-          </div>
-          <button id="pin-manage-btn" class="pin-manage-icon" type="button" title="管理密碼">⚙</button>
+      <form id="cost-unlock-form" class="pin-dialog" role="dialog" aria-modal="true" aria-labelledby="pin-dialog-title">
+        <div class="pin-dialog-header"><div>
+          <p class="section-label">額外保護</p>
+          <h2 id="pin-dialog-title">解鎖成本</h2>
+        </div></div>
+        <p id="pin-dialog-hint" class="pin-hint">解鎖後，此瀏覽器會保留權限。重新認證、停權或管理員變更成本密碼後，需重新解鎖。</p>
+        <label class="visually-hidden" for="pin-input">成本密碼</label>
+        <input id="pin-input" class="pin-input" type="password" minlength="12" maxlength="128"
+          autocomplete="off" placeholder="輸入成本密碼" required />
+        <p id="pin-error" class="pin-error hidden" role="alert"></p>
+        <div class="pin-actions">
+          <button id="pin-cancel" class="ghost-button" type="button">取消</button>
+          <button id="pin-confirm" class="primary-button" type="submit">解鎖成本</button>
         </div>
-        <p id="pin-dialog-hint" class="pin-hint"></p>
-
-        <!-- 解鎖區 -->
-        <div id="pin-unlock-section">
-          <input
-            id="pin-input"
-            class="pin-input"
-            type="password"
-            inputmode="text"
-            maxlength="64"
-            autocomplete="off"
-            placeholder="輸入密碼"
-          />
-          <p id="pin-error" class="pin-error hidden">密碼錯誤，請再試一次</p>
-          <label class="pin-remember">
-            <input type="checkbox" id="pin-remember" checked />
-            記住密碼（僅存於本機）
-          </label>
-          <div class="pin-actions">
-            <button id="pin-cancel" class="ghost-button" type="button">取消</button>
-            <button id="pin-confirm" class="primary-button" type="button">確認</button>
-          </div>
-        </div>
-
-        <!-- 管理區（預設隱藏）-->
-        <div id="pin-manage-section" class="hidden">
-          <p class="pin-hint">修改本機記憶的密碼，或清除記憶。<br>注意：此操作不影響 JSON 檔案的加密。</p>
-          <input id="pin-new-input" class="pin-input" type="password" placeholder="輸入新密碼" autocomplete="off" />
-          <div class="pin-actions">
-            <button id="pin-clear-saved" class="ghost-button" type="button">清除記憶</button>
-            <button id="pin-save-new" class="primary-button" type="button">儲存新密碼</button>
-          </div>
-        </div>
-      </div>
+      </form>
     </div>
 
     <!-- 欄位設定抽屜 -->
@@ -262,6 +205,6 @@
       </aside>
     </div>
 
-    <script type="module" src="./app.js?v=49"></script>
+    <script type="module" src="./app.js?v=51"></script>
   </body>
 </html>
