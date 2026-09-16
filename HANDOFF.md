@@ -69,7 +69,7 @@ py -3.10 scripts/publish_data.py --check-only
 
 ## 實測狀態與待辦
 
-### v51 成本保護與 PDF 移除（2026-09-16，本機完成，尚未發布）
+### v51 成本保護與 PDF 移除（2026-09-16，已發布）
 
 - 隱藏手勢：模式標籤 5 →「價」4 → 模式標籤 3，逐次間隔不超過 3 秒。
   原桌面連按兩次 Ctrl+反斜線入口也只會開成本密碼框，不繞過密碼。
@@ -90,14 +90,14 @@ py -3.10 scripts/publish_data.py --check-only
 - PDF 上傳、解析、預覽、pdf.js 與專用解析測試／備忘已移除，Git 歷史可找回；
   dist 改為清空後按白名單建置，不發布 vendor、Excel 或私有資料。沒有修改舊 GitHub Pages。
 
-首次正式發布順序（需使用者要求發布，且避開每日排程正在執行時段）：
+首次正式發布順序（本次第 1～3 步已完成）：
 
 1. 跑 npm test、Python publisher 測試、BI selftest，非 0 不發布。
 2. 執行 `py -3.10 scripts/migrate_costs.py`：從 D1 現有加密包在記憶體拆分成本，
    保留原 fetched_at，不把舊資料冒充今日同步；可重跑。這會寫 D1，不是唯讀檢查。
    若每日 publish_data.py 已產生 split-costs-v1，遷移會直接跳過。
 3. `npm run deploy`，檢查匿名 API 拒絕、後台 Access 與前端版本 v51。
-4. 管理員親自登入後台「成本密碼」設定密碼，再讓測試装置重新整理、確認取得新版料檔後驗收手勢。
+4. 管理員親自登入後台「成本密碼」設定密碼，再讓測試装置重新整理、確認取得新版料檔後驗收手勢（待管理員操作）。
    未設定密碼時一般價格可查，成本不能解鎖。發布器會自行建立新增的成本資料表，
    因此本機 checkout 被每日排程使用時不會因尚未手動遷移而缺表；但舊 Worker 沒有成本解鎖介面。
 
@@ -111,7 +111,15 @@ Python 測試含產品範圍正規化、成本分包、全形欄名、缺表初�
 測試未連正式 Cloudflare 或 BI，也未設定正式成本密碼；手機 Safari／Android 仍待實機驗收。
 最終檢查：Node 8 項、Python 4 項、公開檔建置、JS 語法及 git diff --check 通過。
 另跑 BI selftest 回傳 0；四張關鍵表同步時間為 2026-09-15 17:00～17:03，
-未執行正式同步、成本遷移、commit、push 或部署。
+未執行新的 BI 同步；本次沿用 2026-09-15 17:04:09 的 V36 快取資料。
+
+2026-09-16 正式發布：commit `e1b6840` 已推送至 `origin/codex/price-pwa-auto-update`；
+Cloudflare Worker version `f8005e6b-2b90-43db-9520-e01c7b42d3f7`。
+遷移工具回報 current bundle 已是 split-costs 格式，因此沒有重寫；D1 核對為 1,891 筆一般產品、
+1,891 筆成本資料、一般密文 28 chunks、成本密文 2 chunks，fetched_at 保留 2026-09-15 17:04:09。
+公開 index、app、managed、cost crypto/session 與 service worker 均和本機 dist 雜湊一致；
+前端回 200，後台匿名回 302 至 Access，匿名 status／bundle API 回 401。
+正式 `cost_password_v1` 尚未設定；一般價格可用，但管理員設定密碼前成本無法解鎖。
 
 - 已部署初版、完成瀏覽器姓名申請 → 待核准 → 測試裝置核准 → 解密載入 1,891 筆的測試。
 - 2026-09-15 唯讀檢查：前端 HTTP 200、後台未登入 302、匿名資料下載 401。
