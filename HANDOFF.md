@@ -1,10 +1,11 @@
-# 售價速查新版交接 — 2026-09-16
+# 售價速查新版交接 — 2026-09-17
 
-## 最新接手狀態：v52 搜尋模式（2026-09-16）
+## 最新接手狀態：v52 搜尋模式（2026-09-17，已發布）
 
 使用者要求：更多選項可切換原有搜尋與僅型號／中文品名搜尋，主畫面清楚標示並記憶選擇。
-已在既有功能分支 `codex/price-pwa-auto-update` 完成；**尚未 commit、push 或部署 v52**。
-不要把本機 v52 誤當已上線；v51 正式發布紀錄在下方。本次沒有改 Worker、D1、資料發布或每日排程。
+已提交並推送功能分支 `codex/price-pwa-auto-update`，commit `825200b`；已發布至 Cloudflare。
+正式 Worker version：`122e0c9c-48af-44b0-ad90-55e61b5766d4`（2026-09-17 00:31 UTC）。
+公開前端已核對 `v=52` 與 `search-mode-select`；本次沒有改 D1、資料發布或每日排程。
 
 - `index.html` / `styles.css`：更多選項的原生下拉選單與搜尋框上方模式按鈕。
   延續原有綠色／米色樣式，選單用不透明底色以避免底下文字干擾；選單 44px 觸控高度。
@@ -27,7 +28,7 @@
 斷線測試預期產生 `/api/status` 的 `ERR_INTERNET_DISCONNECTED`，不算未處理程式異常。
 未測實體 iOS／Android；不要把 Chromium 手機尺寸與模擬離線當成真機驗收。
 
-後續若使用者要求发布：先重跑 npm test / build，再依既有程序 commit／push／`npm run deploy`，
+後續修改時：先重跑 npm test / build，再依既有程序 commit／push／`npm run deploy`，
 確認公開檔案與 dist 一致並回填 commit / Worker version。純搜尋功能不必執行資料發布、成本遷移或 BI 同步。
 保留使用者 `.claude/`；不得將假裝置、私有資料、測試瀏覽器狀態或輸出截圖加入 Git。
 
