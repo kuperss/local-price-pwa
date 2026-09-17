@@ -17,3 +17,15 @@ test('public build includes offline cost module and excludes retired PDF and pri
   assert.match(sw,/"\.\/search\.js"/);
   assert.match(readFileSync(resolve(root,'index.html'),'utf8'),/id="cost-unlock-form"/);
 });
+
+test('user-facing frontend, admin and API messages use @ instead of the protected field name',()=>{
+  const visibleFiles=['index.html','app.js','managed.js','cost-session.js','admin/index.html','admin/admin.js','worker/index.js'];
+  for(const file of visibleFiles){
+    const source=readFileSync(resolve(file),'utf8')
+      .replace(/<!--[^]*?-->/g,'')
+      .replace(/^\s*\/\/.*$/gm,'');
+    assert.doesNotMatch(source,/成本/,file);
+  }
+  const cryptoSource=readFileSync(resolve('cost-crypto.js'),'utf8').replace('/成本|cost/i','');
+  assert.doesNotMatch(cryptoSource,/成本/,'cost-crypto.js messages');
+});

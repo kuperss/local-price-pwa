@@ -202,7 +202,7 @@ function bindEvents() {
   refs.pinCancel?.addEventListener("click", closePinDialog);
   refs.pinOverlay?.addEventListener("click", (e) => { if (e.target === refs.pinOverlay) closePinDialog(); });
   document.querySelector('#cost-lock-button').addEventListener('click', async () => {
-    try { await managed.forgetCosts();showToast('成本已鎖回'); }
+    try { await managed.forgetCosts();showToast('@已鎖回'); }
     catch { showToast('清除解鎖權限失敗，請重試'); }
   });
   refs.clearHistoryButton.addEventListener("click", clearSearchHistory);
@@ -642,7 +642,7 @@ function bindCostGesture() {
 }
 function openCostPasswordDialog() {
   if(!managed?.allowed){showToast('請先完成裝置核准並載入料檔');return;}
-  if(state.costs){showToast('成本已解鎖，可在更多選項鎖回');return;}
+  if(state.costs){showToast('@已解鎖，可在更多選項鎖回');return;}
   costAttempt++;
   costDialogFocus=document.activeElement;
   refs.pinInput.value='';refs.pinConfirm.disabled=false;
@@ -684,7 +684,7 @@ async function onCostPasswordSubmit(event) {
     const rows=await managed.unlockCosts(password);
     if(attempt!==costAttempt||!managed.allowed)return;
     closePinDialog();showCosts(rows);
-    showToast('成本已解鎖，此瀏覽器將保留權限');
+    showToast('@已解鎖，此瀏覽器將保留權限');
   }catch(error){
     if(attempt!==costAttempt)return;
     refs.pinError.textContent=error.message;refs.pinError.classList.remove('hidden');refs.pinInput.focus();
@@ -693,8 +693,8 @@ async function onCostPasswordSubmit(event) {
 function renderCostFields(entry) {
   const row=state.costs?.get(entry.sku);
   const fields=row?Object.entries(row).filter(([label])=>isCostField(label)):[];
-  if(!fields.length)return `<div class="detail-item" data-cost-field><span class="detail-item-label">成本</span><span class="detail-item-value cost-locked">${state.costs?'無成本資料':'未解鎖'}</span></div>`;
-  return fields.map(([label,value])=>`<div class="detail-item detail-item-copyable" data-cost-field data-copy-value="${escapeHtml(String(value))}"><span class="detail-item-label">${escapeHtml(label==='銷售成本'?'成本':label)}</span><span class="detail-item-value">${escapeHtml(String(value))}</span></div>`).join('');
+  if(!fields.length)return `<div class="detail-item" data-cost-field><span class="detail-item-label">@</span><span class="detail-item-value cost-locked">${state.costs?'無資料':'未解鎖'}</span></div>`;
+  return fields.map(([,value])=>`<div class="detail-item detail-item-copyable" data-cost-field data-copy-value="${escapeHtml(String(value))}"><span class="detail-item-label">@</span><span class="detail-item-value">${escapeHtml(String(value))}</span></div>`).join('');
 }
 
 async function loadDetailFieldConfig() {

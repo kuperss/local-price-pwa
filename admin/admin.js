@@ -17,7 +17,7 @@ async function load(){
   $('#summary').innerHTML=[['已開通装置',counts.approved||0],['待審核裝置',counts.pending||0],['已停權裝置',counts.revoked||0],['目前產品數',overview.bundle?.product_count||0]].map(([title,value])=>`<div class="metric"><span>${title}</span><strong>${Number(value).toLocaleString()}</strong></div>`).join('');
   $('#range').textContent=overview.bundle?`料檔：${date(overview.bundle.fetched_at)}`:'尚未發布料檔';
   if(page==='security'){
-   $('#password-state').textContent=rows.configured?`已設定 · 最近變更 ${date(rows.updatedAt)}`:'尚未設定；目前所有使用者都無法解鎖成本。';
+   $('#password-state').textContent=rows.configured?`已設定 · 最近變更 ${date(rows.updatedAt)}`:'尚未設定；目前所有使用者都無法解鎖@。';
    message('輸入新密碼並確認即可設定或變更。');return;
   }
   const size=page==='events'?100:200;$('#prev').disabled=offset===0;$('#next').disabled=rows.length<size;$('#page-count').textContent=`第 ${Math.floor(offset/size)+1} 頁`;
@@ -39,7 +39,7 @@ async function load(){
   message('資料已更新。');
  }catch(e){message(e.message,true);}finally{if(token===serial)$('#refresh').disabled=false;}
 }
-function show(next){page=next;offset=0;document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===page));$('#title').textContent={devices:'裝置與使用者',events:'查詢紀錄',requests:'型號審核',catalog:'更新清單',security:'成本密碼'}[page];
+function show(next){page=next;offset=0;document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===page));$('#title').textContent={devices:'裝置與使用者',events:'查詢紀錄',requests:'型號審核',catalog:'更新清單',security:'@密碼'}[page];
  $('#list-surface').hidden=page==='security';$('#password-panel').hidden=page!=='security';$('#cost-password-form').reset();
  $('#filters').innerHTML=page==='events'?`<form id="search"><input type="search" name="q" placeholder="搜尋型號或查詢文字" value="${esc(query)}"><button>搜尋</button></form>${device?'<button id="all-devices">查看所有裝置</button>':''}`:page==='requests'?`<button data-review="approved" class="primary">核准勾選型號</button><button data-review="rejected">不予通過</button>${device?'<button id="all-devices">查看所有裝置</button>':''}`:'';
  load();}
@@ -64,11 +64,11 @@ $('#cost-password-form').addEventListener('submit',async event=>{
  button.disabled=true;
  let config;
  try{
-  if(!await confirm('儲存後，前端收到更新時會鎖回成本，須使用新密碼解鎖。確定變更？'))return;
+  if(!await confirm('儲存後，前端收到更新時會鎖回@，須使用新密碼解鎖。確定變更？'))return;
   form.reset();message('正在安全處理密碼…');
   config=await createCostPasswordConfig(password);password='';
   await api('cost-password',config);config.wrappingKey='';
-  await load();message('成本密碼已更新。請重新整理前端，取得最新設定後用新密碼解鎖。');
+  await load();message('@密碼已更新。請重新整理前端，取得最新設定後用新密碼解鎖。');
  }catch(error){message(error.message,true);}
  finally{password='';if(config)config.wrappingKey='';form.reset();button.disabled=false;}
 });

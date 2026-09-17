@@ -79,7 +79,7 @@ async function api(request,env,url){
   if(!b) fail(503,'產品資料尚未發布');
   // Never serve legacy bundles: those included costs in the ordinary price payload.
   const costs=await env.DB.prepare('SELECT * FROM cost_bundles WHERE version=?').bind(b.version).first();
-  if(!costs) fail(503,'料檔安全格式升級中，請聯絡管理員完成成本資料分離');
+  if(!costs) fail(503,'料檔安全格式升級中，請聯絡管理員完成@資料分離');
   const configRow=await env.DB.prepare("SELECT value FROM settings WHERE key='cost_password_v1'").first();
   const config=configRow?JSON.parse(configRow.value):null;
   const costRevision=config?.revision||'none';
@@ -89,7 +89,7 @@ async function api(request,env,url){
    cost={configured:false,revision:costRevision};
    if(config){
     const chunks=await env.DB.prepare('SELECT content FROM cost_chunks WHERE version=? ORDER BY seq').bind(b.version).all();
-    if(chunks.results.length!==costs.chunks) fail(503,'成本資料包不完整');
+    if(chunks.results.length!==costs.chunks) fail(503,'@資料包不完整');
     cost={configured:true,revision:costRevision,version:b.version,salt:config.salt,iterations:config.iterations,
       ...await wrapCostKey(costs.key_b64,b.version,config),iv:costs.iv_b64,cipher:chunks.results.map(x=>x.content).join(''),hash:costs.content_hash};
    }
@@ -117,7 +117,7 @@ async function adminApi(request,env,url,data,actor){
   return json({configured:!!config,updatedAt:config?.updatedAt||null,revision:config?.revision||null});
  }
  if(path==='cost-password'&&request.method==='POST'){
-  if(!validCostConfig(data)) fail(400,'成本密碼設定格式錯誤');
+  if(!validCostConfig(data)) fail(400,'@密碼設定格式錯誤');
   const config={salt:data.salt,iterations:data.iterations,wrappingKey:data.wrappingKey,revision:crypto.randomUUID(),updatedAt:now()};
   await env.DB.batch([env.DB.prepare("INSERT INTO settings VALUES('cost_password_v1',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(config)),log('cost_password_changed',config.revision)]);
   return json({ok:true,updatedAt:config.updatedAt,revision:config.revision});

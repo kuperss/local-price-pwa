@@ -57,7 +57,7 @@ export async function startManaged(hooks){
  async function decrypt(cache){
   const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:bytes(cache.iv),additionalData:enc.encode(cache.version)},cache.localKey,bytes(cache.cipher));
   const rows=JSON.parse(new TextDecoder().decode(plain));if(!Array.isArray(rows)||!rows.length) throw new Error('料檔格式錯誤');
-  if(rows.some(row=>!row||Object.keys(row).some(isCostField)))throw new Error('料檔尚未完成成本分離，請聯絡管理員更新');
+  if(rows.some(row=>!row||Object.keys(row).some(isCostField)))throw new Error('料檔尚未完成@分離，請聯絡管理員更新');
   return rows;
  }
  async function openCached(){

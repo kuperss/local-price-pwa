@@ -12,7 +12,7 @@ export function createCostSession({get,set,del,context,lock,show}) {
   function forget(){epoch++;lock();return exclusive(()=>del(COST_ACCESS_KEY));}
   async function unlock(password){
     const c=context(),token=epoch;
-    if(!usable(c))throw new Error('請先連線確認装置權限及成本密碼設定');
+    if(!usable(c))throw new Error('請先連線確認装置權限及@密碼設定');
     const key=await passwordKey(password,c.envelope.salt);
     const rows=await decryptCostEnvelopeWithKey(key,c.envelope);
     await exclusive(async()=>{
