@@ -45,6 +45,12 @@ export async function catalogApi(request,db,url,data,actor){
   const sort={sku:'sku',name:'name',available:'available',shipping:'shipping',a2:'a2',state:'state'}[p.get('sort')]||'sku';
   const dir=p.get('dir')==='desc'?'DESC':'ASC',offset=Math.max(0,parseInt(p.get('offset'))||0);
   const rows=await all(db,cte+'SELECT * FROM products'+clause+` ORDER BY ${sort} ${dir},sku LIMIT 100 OFFSET ?`,[...params,offset]);
+  const relatedCodes=row=>[...new Set([row.transfer,...JSON.parse(row.targets)].filter(Boolean))];
+  const related=await productMap(db,[...new Set(rows.flatMap(relatedCodes))]);
+  for(const row of rows)row.replacements=relatedCodes(row).map(code=>{
+   const r=related.get(code)||absent(code);
+   return {sku:code,name:r.name||'',available:r.available??null,shipping:r.shipping??null,a2:r.a2??null,missing:r.missing,state:r.state};
+  });
   const total=(await db.prepare(cte+'SELECT COUNT(*) n FROM products'+clause).bind(...params).first()).n;
   const metrics=await db.prepare(cte+'SELECT '+Object.entries(filters).map(([key,expr])=>`SUM(CASE WHEN tracked=1 AND (${expr}) THEN 1 ELSE 0 END) AS "${key}"`).join(',')+' FROM products').first();
   const bundle=await db.prepare('SELECT fetched_at,published_at,product_count FROM bundles WHERE version=?').bind(s.current_bundle||'').first();

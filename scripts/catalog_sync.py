@@ -104,6 +104,8 @@ def plan(cloud,db,payload):
     rules={r['sku']:r for r in records};aliases=[];blocked=[]
     def targets(code):
         manual=json.loads(rules.get(code,{}).get('targets','[]'))
+        # An explicit replacement selects its destinations; source links remain readonly history.
+        if rules.get(code,{}).get('replace_old') and manual:return sorted(set(manual))
         source=products.get(code,{}).get('transfer','')
         return sorted(set(manual+([source] if source else [])))
     def leaves(code,seen):

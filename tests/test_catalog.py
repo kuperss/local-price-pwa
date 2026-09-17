@@ -90,5 +90,13 @@ class CatalogTests(unittest.TestCase):
                 publisher.publish_bundle(self.cloud,'',rows,payload()['fetched_at'],resolved,missing,catalog_plan=plan)
         self.assertEqual(catalog.setting(self.cloud,'','current_bundle'),'other-complete-version')
 
+    def test_explicit_replacement_does_not_force_unselected_erp_target(self):
+        p=payload();p['master']['OLD']['TA_IMA107']='UNKNOWN-ERP-TARGET'
+        self.cloud.query('',"INSERT INTO catalog_rules VALUES('OLD',0,'','[\"NEW\"]',1,'stamp','owner')")
+        plan=catalog.plan(self.cloud,'',p)
+        self.assertEqual(plan['blocked'],[])
+        self.assertEqual(plan['aliases'][0]['_replacements'],['NEW'])
+        self.assertEqual(p['master']['OLD']['TA_IMA107'],'UNKNOWN-ERP-TARGET')
+
 
 if __name__=='__main__':unittest.main()

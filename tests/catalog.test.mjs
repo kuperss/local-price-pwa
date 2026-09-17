@@ -66,3 +66,19 @@ test('full metadata pagination and a 100-SKU batch stay bounded',async()=>{
   assert.equal(sql.prepare('SELECT COUNT(*) n FROM admin_audit').get().n,100);
  }finally{sql.close();}
 });
+
+test('list returns replacement stock outside the selected catalog, including unknown and missing',async()=>{
+ const {sql,call}=fixture();try{
+  let old=(await call('?q=OLD')).rows[0];
+  assert.deepEqual(old.replacements[0],{sku:'NEW',name:'品名NEW',available:4,shipping:0,a2:4,missing:0,state:'outside'});
+  await call('/apply',{action:'edit',codes:['OLD'],targets:['NEW','UNK','NEG','GONE'],revision:'0'});
+  old=(await call('?q=OLD')).rows[0];
+  assert.equal(old.replacements.length,4);
+  assert.equal(old.replacements.find(r=>r.sku==='UNK').available,null);
+  assert.equal(old.replacements.find(r=>r.sku==='NEG').available,-7);
+  assert.equal(old.replacements.find(r=>r.sku==='GONE').missing,1);
+  const changed=await call('/apply',{action:'replace',codes:['OLD'],targets:['NEXT'],revision:(await call()).revision});
+  assert.ok(changed.ok);assert.equal(sql.prepare("SELECT targets FROM catalog_rules WHERE sku='OLD'").get().targets,'["NEXT"]');
+  assert.equal(sql.prepare("SELECT COUNT(*) n FROM catalog WHERE sku='NEW'").get().n,0);
+ }finally{sql.close();}
+});

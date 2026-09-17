@@ -1,3 +1,4 @@
+import {stockStatus,replacementCodes} from './replacements.js';
 const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const states={published:'已發布',pending_add:'待加入',pending_remove:'待移除',removed:'已移除',outside:'未加入'};
 const labels={attention:'需要檢查',transfer_zero:'有售轉且零庫存',clearance:'售架有庫存',discontinued_stock:'停產有庫存',sale:'售架',discontinued:'停產',sale_empty:'售架無可用量',transfer:'有售轉／替代',changed:'本次狀態變動',returned:'移除後仍有庫存',unknown:'庫存未知',missing:'來源查無資料'};
@@ -7,6 +8,8 @@ let result,selected=new Set(),preview=[],detail,serial=0,busy=false;
 const date=s=>s?new Date(s).toLocaleString('zh-TW',{hour12:false}):'尚未同步';
 const num=v=>v==null?'<span class="unknown">未知</span>':`<span class="${v<0?'negative':v===0?'zero':''}">${Number(v).toLocaleString('zh-TW')}</span>`;
 const state=r=>`<span class="badge state-${esc(r.state)}">${states[r.state]||'未知'}</span>${r.missing?'<small class="warning">來源查無資料</small>':''}`;
+function replacementStock(r){const status=stockStatus(r);return `<span class="replacement-stock ${status.tone}" title="實際可用量＝出貨可用量 ${esc(r.shipping??'未知')} ＋ A2外倉 ${esc(r.a2??'未知')}">${esc(status.label)}</span>`;}
+function replacementCell(row){return (row.replacements||[]).map(r=>`<div class="replacement-item"><button class="sku-link" data-detail="${esc(r.sku)}">${esc(r.sku)}</button>${replacementStock(r)}</div>`).join('')||'—';}
 async function api(path='',data){const r=await fetch('/admin/api/products'+path,{method:data?'POST':'GET',headers:{'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined,cache:'no-store'});let value;try{value=await r.json();}catch{throw new Error('登入已逾時，請重新整理並登入管理後台。');}if(!r.ok)throw new Error(value.error||'讀取失敗');return value;}
 function message(text,error=false){$('#message').textContent=text;$('#message').className=error?'error':'';}
 function save(){try{localStorage.setItem(key,JSON.stringify(view));}catch{}}
@@ -22,7 +25,7 @@ async function load(){
  try{
   const data=await api('?'+new URLSearchParams({...view,filters:view.filters.join(',')}));if(token!==serial)return;result=data;selected.clear();selection();filterButtons();
   $('#source-time').textContent=date(data.fetchedAt);$('#live-time').textContent=data.bundle?`${date(data.bundle.fetched_at)} · ${data.bundle.product_count.toLocaleString()} 筆`:'尚未發布';
-  $('#rows').innerHTML=data.rows.map(r=>`<tr><td><input type="checkbox" data-select="${esc(r.sku)}" aria-label="選取 ${esc(r.sku)}"></td><td><button class="sku-link" data-detail="${esc(r.sku)}">${esc(r.sku)}</button><small>${esc(r.changes)}</small>${r.issue?`<small class="negative">${esc(r.issue)}</small>`:''}</td><td>${esc(r.name||'來源查無資料')}${r.note?`<small>備註：${esc(r.note)}</small>`:''}</td><td>${r.sale==='Y'?'<span class="badge">Y</span>':esc(r.sale||'—')}</td><td>${r.discontinued==='Y'?'<span class="badge">Y</span>':esc(r.discontinued||'—')}</td><td>${num(r.shipping)}</td><td>${num(r.a2)}</td><td>${num(r.available)}</td><td>${num(r.incoming)}</td><td>${esc([...new Set([r.transfer,...JSON.parse(r.targets)].filter(Boolean))].join('、')||'—')}</td><td>${state(r)}</td><td><button data-action="${r.active?'remove':'add'}" data-sku="${esc(r.sku)}">${r.active?'移出':r.tracked?'恢復':'加入'}</button></td></tr>`).join('')||'<tr><td colspan="12" class="empty">沒有符合條件的型號。可清除篩選，或改查完整產品來源。</td></tr>';
+  $('#rows').innerHTML=data.rows.map(r=>`<tr><td><input type="checkbox" data-select="${esc(r.sku)}" aria-label="選取 ${esc(r.sku)}"></td><td><button class="sku-link" data-detail="${esc(r.sku)}">${esc(r.sku)}</button><small>${esc(r.changes)}</small>${r.issue?`<small class="negative">${esc(r.issue)}</small>`:''}</td><td>${esc(r.name||'來源查無資料')}${r.note?`<small>備註：${esc(r.note)}</small>`:''}</td><td>${r.sale==='Y'?'<span class="badge">Y</span>':esc(r.sale||'—')}</td><td>${r.discontinued==='Y'?'<span class="badge">Y</span>':esc(r.discontinued||'—')}</td><td>${num(r.shipping)}</td><td>${num(r.a2)}</td><td>${num(r.available)}</td><td>${num(r.incoming)}</td><td>${replacementCell(r)}</td><td>${state(r)}</td><td><div class="row-actions">${r.active?`<button class="replace-action" data-replace="${esc(r.sku)}">取代</button>`:''}<button data-action="${r.active?'remove':'add'}" data-sku="${esc(r.sku)}">${r.active?'移出':r.tracked?'恢復':'加入'}</button></div></td></tr>`).join('')||'<tr><td colspan="12" class="empty">沒有符合條件的型號。可清除篩選，或改查完整產品來源。</td></tr>';
   $('#result-count').textContent=`符合 ${data.total.toLocaleString()} 筆`;$('#page-count').textContent=`第 ${Math.floor(view.offset/100)+1} / ${Math.max(1,Math.ceil(data.total/100))} 頁`;
   $('#prev').disabled=view.offset===0;$('#next').disabled=view.offset+100>=data.total;
   const blocked=data.report?.blocked||[];$('#publish-report').hidden=!blocked.length;$('#publish-report').textContent=blocked.length?'上次發布仍保留以下舊品：'+blocked.map(r=>r.sku+'（'+r.reason+'）').join('；'):'';
@@ -52,6 +55,7 @@ document.addEventListener('click',e=>{
  const f=e.target.closest('[data-filter]');if(f){const value=f.dataset.filter;view.filters=view.filters.includes(value)?view.filters.filter(x=>x!==value):[...view.filters,value];view.scope='tracked';view.offset=0;controls();load();}
  const sort=e.target.closest('[data-sort]');if(sort){view.dir=view.sort===sort.dataset.sort&&view.dir==='asc'?'desc':'asc';view.sort=sort.dataset.sort;view.offset=0;load();}
  const d=e.target.closest('[data-detail]');if(d)showDetail(d.dataset.detail);
+ const replace=e.target.closest('[data-replace]');if(replace)showReplacement(replace.dataset.replace);
  const a=e.target.closest('[data-action]');if(a)membership(a.dataset.action,[a.dataset.sku]);
 });
 $('#rows').addEventListener('change',e=>{if(!e.target.matches('[data-select]'))return;e.target.checked?selected.add(e.target.dataset.select):selected.delete(e.target.dataset.select);selection();});
@@ -71,5 +75,39 @@ for(const [id,action] of [['replace','replace'],['add-targets','add_targets']])$
  if(!targets.length){$('#detail-message').textContent='請先填寫替代型號。';return;}
  if(!confirm(`加入替代型號：${targets.join('、')}\n${action==='replace'?'舊品將待移除；新資料未能完整發布時保留舊品。':'舊品仍留在清單。'}\n尚未儲存的備註不會隨此操作變更。`))return;
  try{if(await apply(action,[detail.root.sku],{targets},detail.revision))await showDetail(detail.root.sku);}catch(e){$('#detail-message').textContent=e.message;}
+};
+let replacing=null,replacementPreview=[],replacementSerial=0;
+async function showReplacement(code){
+ const token=++replacementSerial;replacing=null;replacementPreview=[];
+ $('#replacement-title').textContent=`取代 ${code}`;$('#replacement-codes').value='';$('#replacement-preview').innerHTML='';$('#replacement-message').textContent='讀取型號與庫存…';$('#confirm-replacement').disabled=true;
+ if(!$('#replacement-dialog').open)$('#replacement-dialog').showModal();
+ try{
+  const data=await api('/detail?sku='+encodeURIComponent(code));if(token!==replacementSerial)return;
+  replacing={sku:code,revision:data.revision};$('#replacement-codes').value=replacementCodes(data.root).join('\n');
+  if($('#replacement-codes').value)await previewReplacement();else{$('#replacement-message').textContent='目前未指定替代型號，請輸入後檢查。';$('#replacement-codes').focus();}
+ }catch(e){$('#replacement-message').textContent=e.message;}
+}
+async function previewReplacement(){
+ if(!replacing)return;const text=$('#replacement-codes').value,token=++replacementSerial;
+ $('#confirm-replacement').disabled=true;replacementPreview=[];$('#replacement-preview').innerHTML='';$('#replacement-message').textContent='檢查中…';
+ try{
+  const data=await api('/preview',{codes:text});if(token!==replacementSerial||text!==$('#replacement-codes').value)return;
+  if(data.revision!==replacing.revision)throw new Error('清單已被更新，請關閉視窗後重新點「取代」。');
+  if(data.rows.length>20)throw new Error('每次最多指定 20 個替代型號。');
+  replacementPreview=data.rows;
+  $('#replacement-preview').innerHTML=data.rows.map(r=>`<div class="replacement-preview-row"><div><strong>${esc(r.sku)}</strong><small>${esc(r.name||'來源查無資料')}</small></div>${replacementStock(r)}<small>出貨 ${num(r.shipping)} ＋ A2 ${num(r.a2)}</small></div>`).join('');
+  const invalid=data.rows.some(r=>r.missing||r.sku===replacing.sku);
+  $('#confirm-replacement').disabled=invalid||!data.rows.length;
+  $('#replacement-message').textContent=invalid?'有型號查無來源或與舊型號相同，請修正後再檢查。':data.rows.some(r=>r.available==null||r.available<=0)?'注意：部分替代品目前無可用量或庫存未知。若仍要取代，可按下方確認。':'替代品目前有可用庫存，請確認下列型號後取代。';
+ }catch(e){$('#replacement-message').textContent=e.message;}
+}
+$('#replacement-codes').oninput=()=>{++replacementSerial;replacementPreview=[];$('#confirm-replacement').disabled=true;$('#replacement-preview').innerHTML='';$('#replacement-message').textContent='型號已修改，請重新檢查。';};
+$('#check-replacement').onclick=previewReplacement;
+$('#replacement-dialog').addEventListener('close',()=>{++replacementSerial;replacing=null;replacementPreview=[];});
+$('#confirm-replacement').onclick=async()=>{
+ if(!replacing||!replacementPreview.length||$('#confirm-replacement').disabled)return;
+ $('#confirm-replacement').disabled=true;
+ try{if(await apply('replace',[replacing.sku],{targets:replacementPreview.map(r=>r.sku)},replacing.revision))$('#replacement-dialog').close();}
+ catch(e){$('#replacement-message').textContent=e.message;}
 };
 controls();filterButtons();load();
