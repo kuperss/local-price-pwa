@@ -1,7 +1,7 @@
-const CACHE_NAME = "local-price-pwa-v52-search";
+const CACHE_NAME = "local-price-pwa-v53-search-toggle";
 const APP_SHELL = [
-  "./", "./index.html", "./styles.css?v=52", "./app.js?v=52",
-  "./manifest.webmanifest?v=52", "./assets/icon.svg?v=52",
+  "./", "./index.html", "./styles.css?v=53", "./app.js?v=53",
+  "./manifest.webmanifest?v=53", "./assets/icon.svg?v=53",
   "./managed.js", "./managed.css", "./cost-crypto.js", "./cost-session.js", "./search.js",
 ];
 const SHELL_PATHS = new Set(APP_SHELL.map(path => new URL(path, self.location.href).pathname));

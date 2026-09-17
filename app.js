@@ -209,10 +209,7 @@ function bindEvents() {
   refs.searchForm.addEventListener("submit", onSearchSubmit);
   refs.searchInput.addEventListener("input", onSearchInput);
   refs.searchModeSelect.addEventListener("change", onSearchModeChange);
-  refs.searchModeButton.addEventListener("click", () => {
-    refs.panelMoreOptions.open = true;
-    refs.searchModeSelect.focus();
-  });
+  refs.searchModeButton.addEventListener("click", toggleSearchMode);
   refs.resultsList.addEventListener("click", onResultsClick);
   refs.detailBackdrop.addEventListener("click", closeDetail);
   refs.detailClose.addEventListener("click", closeDetail);
@@ -355,14 +352,23 @@ function renderSearchMode() {
 }
 
 async function onSearchModeChange() {
-  state.searchMode = normalizeSearchMode(refs.searchModeSelect.value);
+  await setSearchMode(refs.searchModeSelect.value, { closeOptions: true, focusButton: true });
+}
+
+async function toggleSearchMode() {
+  const nextMode = state.searchMode === "identity" ? "all" : "identity";
+  await setSearchMode(nextMode, { closeOptions: false, focusButton: false });
+}
+
+async function setSearchMode(mode, { closeOptions, focusButton }) {
+  state.searchMode = normalizeSearchMode(mode);
   renderSearchMode();
   applySearch(state.searchTerm);
   clearTimeout(searchAuditTimer);
   auditedSearch = '';
   if (state.searchTerm) searchAuditTimer = setTimeout(() => auditSearch(state.searchTerm), 900);
-  refs.panelMoreOptions.open = false;
-  refs.searchModeButton.focus();
+  if (closeOptions) refs.panelMoreOptions.open = false;
+  if (focusButton) refs.searchModeButton.focus();
   try {
     await setValue(SEARCH_MODE_KEY, state.searchMode);
     showToast("搜尋模式已記住");

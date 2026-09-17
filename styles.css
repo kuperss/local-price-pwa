@@ -980,6 +980,11 @@ body.detail-open .mobile-dock {
     order: 4;
   }
 
+  .control-panel > .missing-panel {
+    order: 5;
+    margin-top: 0;
+  }
+
   .panel-head,
   .results-head,
   .detail-head {
