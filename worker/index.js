@@ -1,5 +1,6 @@
 import {createRemoteJWKSet,jwtVerify} from 'jose';
 import {catalogApi} from './catalog.js';
+import {serviceError} from './service-error.js';
 import {COST_FORMAT,validCostConfig,wrapCostKey} from '../cost-crypto.js';
 const enc=new TextEncoder();
 const json=(obj,status=200)=>Response.json(obj,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
@@ -162,5 +163,5 @@ export default {async fetch(request,env){
   headers.set('X-Content-Type-Options','nosniff');headers.set('Referrer-Policy','same-origin');headers.set('X-Frame-Options','DENY');
   if(url.pathname.startsWith('/admin')) headers.set('Cache-Control','no-store');
   return new Response(response.body,{status:response.status,headers});
- }catch(e){if(!e.status) console.error('Request failed',e.name);return json({error:e.status?e.message:'服務暫時無法使用'},e.status||500);}
+ }catch(e){const failure=serviceError(e);if(!e.status)console.error('Request failed',failure.body.code||e.name);return json(failure.body,failure.status);}
 }};

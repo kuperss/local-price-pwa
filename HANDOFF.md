@@ -1,5 +1,30 @@
 # 售價速查新版交接 — 2026-09-17
 
+## 檢查原因與 D1 讀取額度（2026-09-17）
+
+- 本次使用者指出 A2=0／沒有在途不是異常，並詢問 D-7DOB5N 為何需檢查。
+  正式唯讀查得：2026-09-16 17:03:39 快照，出貨 1,203 + A2 720 = 1,923；
+  ERP 售轉 D-7DOB5NR1 存在但未在啟用清單，因此列入；原 attention SQL 沒有 A2／在途單項條件。
+- 保留清單維護條件；API 新增 attentionReasons，選取「需要檢查」時顯示獨立原因欄與提示。
+  A2=0、在途=0／缺值改中性色；在途缺值顯示「未列在途」，不冒充 0。實際可用量與未知規則不變。
+- 使用者另回報「取代 OD-SEFL20D」讀取失敗：唯讀 API 實際回 HTTP 400 / code 7500，
+  明確表示帳號 D1 免費每日 row read limit 耗盡；該型號與售轉 E-SEFL20DR2 存在，不是資料格式錯。
+  不可從此推斷整個帳號的額度都由本工具耗用，但原查詢反覆建完整來源 universe 確實浪費讀取。
+- 已拆成三種 SQL：tracked 從 catalog 起查；單型號／批次／關係展開從 json_each(指定型號) 做主鍵 join；
+  僅「完整產品來源」保留全來源 UNION。統計永遠只查已追蹤；不快取／放寬裝置授權。
+  本機 30,000 筆來源測試以 EXPLAIN 驗證使用 metadata 索引，不以正式資料測試耗額度。
+- worker/service-error.js 對每日讀取上限（含巢狀 cause）回 503、D1_DAILY_READ_LIMIT 與繁中提示。
+  其他未知例外仍隱藏細節，401／403 等既有錯誤不改。不得把 503 當停權或清空本機料檔。
+- 官方規則：https://developers.cloudflare.com/d1/platform/pricing/ ，免費讀取 500 萬列／日，
+  UTC 00:00 = 台灣 08:00 重置。耗盡後停止正式 DB 診斷，不擅自升級付費。
+  已耗盡額度不因程式部署恢復；正式服務恢復與實際 rows_read 改善仍待重置後驗證。
+  scripts/check_catalog.mjs 預設只有啟用清單；可帶 SKU 查明細，--all 明確才跑全部；輸出 rowsRead。
+- 驗證：Node 23、Python 11、build、BI selftest 通過；沒有執行 BI 同步或正式價格發布。
+  Playwright 本機假資料測原因／中性顯示／正常取代預填，模擬 503 顯示原因且確認按鈕停用；
+  篩選重新整理保留、清除恢復、390px 無全頁溢出。503 畫面是攔截模擬，Worker 狀態碼另有單元測試。
+  截圖在忽略的 output/playwright/，不視為正式 Access 或真手機驗收。
+
+
 ## 產品清單追加：替代品庫存與列上取代（2026-09-17）
 
 - `worker/catalog.js` 對每頁相關替代 SKU 做一次批次查詢，在 rows.replacements 回傳白名單庫存，

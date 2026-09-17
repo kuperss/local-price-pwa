@@ -5,3 +5,8 @@ export function stockStatus(row){
  return {tone:row.available>0?'in-stock':'out-stock',label:`${row.available>0?'有貨':row.available===0?'無貨':'無可用量'} · ${count}`};
 }
 export const replacementCodes=row=>[...new Set([row.transfer,...JSON.parse(row.targets||'[]')].filter(Boolean))];
+
+export function operationalQuantity(value,kind){
+ if(value==null)return kind==='incoming'?{label:'未列在途',tone:'neutral'}:{label:'未知',tone:'neutral'};
+ return {label:Number(value).toLocaleString('zh-TW'),tone:value<0?'negative':'neutral'};
+}

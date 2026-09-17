@@ -14,7 +14,7 @@ function fixture(){
   if(!['NEW','NEXT'].includes(sku)){sql.prepare('INSERT INTO catalog(sku,source,approved_at) VALUES(?,?,?)').run(sku,'seed','2026-09-17');sql.prepare('INSERT INTO catalog_members VALUES(?,?)').run('v',sku);}
  }
  async function call(path='',data){const url=new URL('https://test/admin/api/products'+path);return (await catalogApi(new Request(url,{method:data?'POST':'GET'}),DB,url,data||{},'owner@test')).json();}
- return {sql,call};
+ return {sql,call,DB};
 }
 test('catalog filters use shipping + A2; unknown and negative stock remain distinct',async()=>{
  const {sql,call}=fixture();try{
@@ -24,6 +24,43 @@ test('catalog filters use shipping + A2; unknown and negative stock remain disti
   assert.equal((await call('?filters=unknown')).rows[0].sku,'UNK');
   assert.equal((await call('?q=NEW&scope=all')).rows[0].state,'outside');
   const detail=await call('/detail?sku=OLD');assert.equal(detail.nodes.length,3);assert.equal(detail.edges.length,2);
+ }finally{sql.close();}
+});
+
+test('attention reasons explain membership; zero A2 and absent incoming alone are normal',async()=>{
+ const {sql,call}=fixture();try{
+  sql.exec("UPDATE product_metadata SET shipping=1923,a2=0,available=1923,incoming=NULL WHERE sku='OLD'; UPDATE product_metadata SET a2=0,incoming=NULL WHERE sku='CLEAR';");
+  let rows=(await call('?scope=tracked&filters=attention')).rows;
+  assert.deepEqual(rows.map(r=>r.sku),['OLD']);
+  assert.deepEqual(rows[0].attentionReasons,['替代型號未納入啟用清單：NEW']);
+  await call('/apply',{action:'add',codes:['NEW'],revision:'0'});
+  rows=(await call('?scope=tracked&filters=attention')).rows;
+  assert.ok(!rows.some(r=>r.sku==='OLD'));
+  sql.exec("UPDATE product_metadata SET available=0 WHERE sku='OLD'; UPDATE product_metadata SET issue='循環' WHERE sku='CLEAR'; DELETE FROM product_metadata WHERE sku='UNK';");
+  const allRows=(await call('?scope=tracked')).rows;
+  const attention=(await call('?scope=tracked&filters=attention')).rows;
+  assert.deepEqual(attention.map(r=>r.sku),allRows.filter(r=>r.attentionReasons.length).map(r=>r.sku));
+  assert.deepEqual(attention.find(r=>r.sku==='OLD').attentionReasons,['原型號實際可用量為 0，已有替代型號']);
+  assert.deepEqual(attention.find(r=>r.sku==='UNK').attentionReasons,['來源查無產品資料']);
+ }finally{sql.close();}
+});
+
+test('detail, preview and tracked metrics use keyed metadata joins, not the full source universe',async()=>{
+ const {sql,call,DB}=fixture();try{
+  sql.exec(`WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x<30000)
+   INSERT INTO product_metadata(snapshot,sku,name,sale,discontinued,eta,transfer) SELECT 's','UNTRACKED-'||x,'未加入','','','','' FROM seq`);
+  const queries=[],prepare=DB.prepare.bind(DB);
+  DB.prepare=query=>{queries.push(query);return prepare(query);};
+  await call('/detail?sku=OLD');
+  await call('/preview',{codes:['NEW','MISSING']});
+  await call('?scope=tracked&filters=attention');
+  assert.ok(queries.filter(q=>q.includes('WITH universe')).length>=5);
+  for(const q of queries.filter(q=>q.includes('WITH universe'))){
+   assert.doesNotMatch(q,/SELECT sku FROM product_metadata/);
+   const plan=sql.prepare('EXPLAIN QUERY PLAN '+q).all(...(q.includes('LIMIT 100')?[0]:q.includes('json_each(?)')?['["OLD"]']:[]));
+   assert.ok(plan.some(r=>/SEARCH m USING INDEX/.test(r.detail)),JSON.stringify(plan));
+   assert.ok(!plan.some(r=>/^SCAN m\b/.test(r.detail)),JSON.stringify(plan));
+  }
  }finally{sql.close();}
 });
 test('batch add, archive, restore, revision conflict and audit are recoverable',async()=>{

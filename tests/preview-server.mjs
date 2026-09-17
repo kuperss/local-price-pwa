@@ -29,6 +29,8 @@ for(const [code,name,sale,disc,ship,a2,transfer] of [['OLD-R9','舊版球泡','Y
  sql.prepare('INSERT INTO product_metadata VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run('fixture',code,name,sale,disc,ship,a2,a2==null?null:ship+a2,0,'',transfer,'','');
  if(!code.startsWith('NEW')){sql.prepare('INSERT INTO catalog(sku,source,approved_at,included_version) VALUES(?,?,?,?)').run(code,'seed','2026-09-16',version);sql.prepare('INSERT INTO catalog_members VALUES(?,?)').run(version,code);}
 }
+// Positive stock with an unlisted replacement: a maintenance reminder, not a stock alarm.
+sql.exec("INSERT INTO product_metadata(snapshot,sku,name,sale,discontinued,shipping,a2,available,incoming,eta,transfer) VALUES('fixture','CHECK-01','有庫存但替代品未納入','','N',1923,0,1923,NULL,'','NEW-R10'); INSERT INTO catalog(sku,source,approved_at) VALUES('CHECK-01','seed','2026-09-17');");
 const pair=await generateKeyPair('RS256'),jwk={...await exportJWK(pair.publicKey),kid:'local-test',alg:'RS256'};
 let issuer;
 const ASSETS={async fetch(request){
