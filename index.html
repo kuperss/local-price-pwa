@@ -11,10 +11,10 @@
       content="裝置核准後自動更新產品料檔，支援離線價格查詢。"
     />
     <meta name="theme-color" content="#17423c" />
-    <link rel="manifest" href="./manifest.webmanifest?v=51" />
-    <link rel="icon" href="./assets/icon.svg?v=51" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="./assets/icon.svg?v=51" />
-    <link rel="stylesheet" href="./styles.css?v=51" />
+    <link rel="manifest" href="./manifest.webmanifest?v=52" />
+    <link rel="icon" href="./assets/icon.svg?v=52" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./assets/icon.svg?v=52" />
+    <link rel="stylesheet" href="./styles.css?v=52" />
     <title>售價速查表</title>
     <link rel="stylesheet" href="./managed.css" />
   </head>
@@ -59,6 +59,14 @@
               <details class="panel-more-options">
                 <summary class="ghost-button" type="button">更多選項</summary>
                 <div class="panel-more-menu">
+                  <div class="search-mode-setting">
+                    <label for="search-mode-select">搜尋模式</label>
+                    <select id="search-mode-select" aria-describedby="search-mode-help">
+                      <option value="all">全部資訊（原有模式）</option>
+                      <option value="identity">僅型號／中文品名</option>
+                    </select>
+                    <p id="search-mode-help">切換立即生效，並自動記住選擇。</p>
+                  </div>
                   <button id="settings-button" class="ghost-button" type="button">
                     欄位設定 ⚙️
                   </button>
@@ -77,6 +85,7 @@
 
 
           <form id="search-form" class="search-shell">
+            <button id="search-mode-button" class="search-mode-button" type="button" aria-controls="search-mode-select" aria-label="目前搜尋模式：全部資訊，點此切換">搜尋：全部資訊 · 切換</button>
             <label class="search-label" for="search-input">可搜尋型號、中文品名、關鍵字或其他資訊</label>
             <div class="search-row">
               <input
@@ -205,6 +214,6 @@
       </aside>
     </div>
 
-    <script type="module" src="./app.js?v=51"></script>
+    <script type="module" src="./app.js?v=52"></script>
   </body>
 </html>

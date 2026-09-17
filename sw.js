@@ -1,8 +1,8 @@
-const CACHE_NAME = "local-price-pwa-v51-costs";
+const CACHE_NAME = "local-price-pwa-v52-search";
 const APP_SHELL = [
-  "./", "./index.html", "./styles.css?v=51", "./app.js?v=51",
-  "./manifest.webmanifest?v=51", "./assets/icon.svg?v=51",
-  "./managed.js", "./managed.css", "./cost-crypto.js", "./cost-session.js",
+  "./", "./index.html", "./styles.css?v=52", "./app.js?v=52",
+  "./manifest.webmanifest?v=52", "./assets/icon.svg?v=52",
+  "./managed.js", "./managed.css", "./cost-crypto.js", "./cost-session.js", "./search.js",
 ];
 const SHELL_PATHS = new Set(APP_SHELL.map(path => new URL(path, self.location.href).pathname));
 self.addEventListener("install", event => {

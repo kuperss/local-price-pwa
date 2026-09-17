@@ -1,5 +1,6 @@
 import { startManaged } from "./managed.js";
 import { isCostField, createCostGesture } from "./cost-crypto.js";
+import { normalizeSearchMode, normalizeForCompare, buildSearchTokens, entryMatchesSearch } from "./search.js";
 let managed;
 let updateToastTimer;
 let searchAuditTimer;
@@ -19,6 +20,7 @@ const DB_VERSION = 1;
 const STORE_NAME = "kv";
 const ACTIVE_DOCUMENT_KEY = "active-document";
 const SEARCH_HISTORY_KEY = "search-history";
+const SEARCH_MODE_KEY = "search-mode";
 const SEARCH_HISTORY_LIMIT = 10;
 const MAX_RESULTS_RENDER = 250;
 const BUNDLE_VERSION = 32;
@@ -59,6 +61,7 @@ const state = {
   entries: [],
   filteredEntries: [],
   searchTerm: "",
+  searchMode: "all",
   searchHistory: [],
   selectedEntry: null,
   beforeInstallPrompt: null,
@@ -74,6 +77,9 @@ const refs = {
   documentTitle: document.querySelector("#document-title"),
   searchForm: document.querySelector("#search-form"),
   searchInput: document.querySelector("#search-input"),
+  searchModeSelect: document.querySelector("#search-mode-select"),
+  searchModeButton: document.querySelector("#search-mode-button"),
+  searchLabel: document.querySelector(".search-label"),
   historyList: document.querySelector("#history-list"),
   statusBanner: document.querySelector("#status-banner"),
   resultsTitle: document.querySelector("#results-title"),
@@ -136,6 +142,8 @@ async function init() {
   if (versionEl) versionEl.textContent = `v${APP_VERSION}`;
   bindEvents();
   state.searchHistory = (await getValue(SEARCH_HISTORY_KEY)) || [];
+  state.searchMode = normalizeSearchMode(await getValue(SEARCH_MODE_KEY));
+  renderSearchMode();
   await loadDetailFieldConfig();
   renderHistory();
   renderShell();
@@ -200,6 +208,11 @@ function bindEvents() {
   refs.clearHistoryButton.addEventListener("click", clearSearchHistory);
   refs.searchForm.addEventListener("submit", onSearchSubmit);
   refs.searchInput.addEventListener("input", onSearchInput);
+  refs.searchModeSelect.addEventListener("change", onSearchModeChange);
+  refs.searchModeButton.addEventListener("click", () => {
+    refs.panelMoreOptions.open = true;
+    refs.searchModeSelect.focus();
+  });
   refs.resultsList.addEventListener("click", onResultsClick);
   refs.detailBackdrop.addEventListener("click", closeDetail);
   refs.detailClose.addEventListener("click", closeDetail);
@@ -324,53 +337,38 @@ function applySearch(term) {
   const tokens = buildSearchTokens(term);
   state.filteredEntries = !normalized
     ? state.entries
-    : state.entries.filter((entry) => entryMatchesSearch(entry, normalized, tokens));
+    : state.entries.filter((entry) => entryMatchesSearch(entry, normalized, tokens, state.searchMode));
 
   renderResults();
   updateDockState();
 }
 
-function entryMatchesSearch(entry, normalized, tokens = []) {
-  if (!normalized) {
-    return true;
-  }
-
-  const aliases = getEntrySearchAliases(entry);
-  if (normalized.length <= 3 && aliases.some((alias) => alias === normalized || alias.startsWith(normalized))) {
-    return true;
-  }
-
-  if ((entry.searchText || "").includes(normalized)) {
-    return true;
-  }
-
-  if (tokens.length <= 1) {
-    return false;
-  }
-
-  return tokens.every((token) => entryMatchesSearchToken(entry, token, aliases));
+function renderSearchMode() {
+  const identityOnly = state.searchMode === "identity";
+  refs.searchModeSelect.value = state.searchMode;
+  refs.searchModeButton.textContent = `搜尋：${identityOnly ? "僅型號／中文品名" : "全部資訊"} · 切換`;
+  refs.searchModeButton.setAttribute("aria-label", `目前搜尋模式：${identityOnly ? "僅型號／中文品名" : "全部資訊"}，點此切換`);
+  refs.searchLabel.textContent = identityOnly
+    ? "只比對型號與中文品名"
+    : "可搜尋型號、中文品名、關鍵字或其他資訊";
+  refs.searchInput.placeholder = identityOnly ? "例如：COB、崁燈、產品型號" : "例如：COB、崁燈、節標、57K";
 }
 
-function entryMatchesSearchToken(entry, token, aliases = getEntrySearchAliases(entry)) {
-  if (!token) {
-    return true;
+async function onSearchModeChange() {
+  state.searchMode = normalizeSearchMode(refs.searchModeSelect.value);
+  renderSearchMode();
+  applySearch(state.searchTerm);
+  clearTimeout(searchAuditTimer);
+  auditedSearch = '';
+  if (state.searchTerm) searchAuditTimer = setTimeout(() => auditSearch(state.searchTerm), 900);
+  refs.panelMoreOptions.open = false;
+  refs.searchModeButton.focus();
+  try {
+    await setValue(SEARCH_MODE_KEY, state.searchMode);
+    showToast("搜尋模式已記住");
+  } catch {
+    showToast("已切換，但無法記住設定；重新開啟後請再確認模式。");
   }
-
-  if (token.length <= 3 && aliases.some((alias) => alias === token || alias.startsWith(token))) {
-    return true;
-  }
-
-  return (entry.searchText || "").includes(token);
-}
-
-function getEntrySearchAliases(entry) {
-  return [
-    entry.sku,
-    entry.productName,
-    ...(entry.searchAliases || []),
-  ]
-    .map((value) => normalizeForCompare(value))
-    .filter(Boolean);
 }
 
 function renderShell() {
@@ -467,7 +465,7 @@ function renderHistory() {
 function renderResults() {
   if (!state.bundle) {
     refs.resultsTitle.textContent = "等待載入料檔";
-    refs.resultsSubtitle.textContent = "装置核准後自動下載，支援型號、中文品名與備註搜尋。";
+    refs.resultsSubtitle.textContent = "裝置核准後自動下載，依目前搜尋模式比對資料。";
     refs.emptyState.classList.remove("hidden");
     refs.emptyState.querySelector(".empty-title").textContent = "請先完成裝置申請";
     refs.emptyState.querySelector(".empty-text").textContent =
@@ -487,13 +485,17 @@ function renderResults() {
   refs.resultsSubtitle.textContent =
     total > MAX_RESULTS_RENDER
       ? `為了讓手機操作更順，先顯示前 ${MAX_RESULTS_RENDER} 筆結果。`
-      : "可用型號、中文品名、價格或備註搜尋，點卡片查看細節或直接點價格快速複製。";
+      : state.searchMode === "identity"
+        ? "目前只比對型號與中文品名，點卡片仍可查看完整產品資訊。"
+        : "可用型號、中文品名、價格或備註搜尋，點卡片查看細節或直接點價格快速複製。";
 
   if (!rendered.length) {
     refs.emptyState.classList.remove("hidden");
     refs.emptyState.querySelector(".empty-title").textContent = "查無符合結果";
     refs.emptyState.querySelector(".empty-text").textContent =
-      "可以換關鍵字試試，或直接用型號、中文品名、底價、開盤價、補充資訊內文字搜尋。";
+      state.searchMode === "identity"
+        ? "請改用型號或中文品名；若要搜尋價格、備註等欄位，請切換為「全部資訊」。"
+        : "可以換關鍵字試試，或直接用型號、中文品名、底價、開盤價、補充資訊內文字搜尋。";
     refs.resultsList.innerHTML = "";
     updateDockState();
     return;
@@ -1325,22 +1327,6 @@ async function copyToClipboard(text) {
   textarea.select();
   document.execCommand("copy");
   textarea.remove();
-}
-
-function buildSearchTokens(text) {
-  return [...new Set(
-    String(text || "")
-      .split(/[\s：:;,.，。/\\|｜()[\]{}_\-"'`]+/g)
-      .map((value) => normalizeForCompare(value))
-      .filter(Boolean),
-  )];
-}
-
-function normalizeForCompare(text) {
-  return String(text || "")
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[：:;,.，。/\\|｜()[\]{}_-]/g, "");
 }
 
 function escapeHtml(text) {

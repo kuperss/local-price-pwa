@@ -333,7 +333,7 @@ button {
   right: 0;
   z-index: 100;
   min-width: 160px;
-  background: var(--surface);
+  background: var(--surface-strong);
   border-radius: 16px;
   box-shadow: 0 8px 32px rgba(23, 66, 60, 0.16);
   padding: 8px;
@@ -350,6 +350,64 @@ button {
   min-height: 40px;
   padding: 0 14px;
   font-size: 0.9rem;
+}
+
+.search-mode-setting {
+  width: 248px;
+  max-width: calc(100vw - 64px);
+  padding: 10px 6px 14px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.search-mode-setting label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--brand);
+}
+
+.search-mode-setting select {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 1rem;
+}
+
+.search-mode-setting p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.search-mode-button {
+  display: block;
+  max-width: 100%;
+  min-height: 44px;
+  margin-bottom: 10px;
+  padding: 9px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-align: left;
+  line-height: 1.5;
+}
+
+.search-mode-button:hover { background: #cce2da; }
+.search-mode-button:focus-visible,
+.search-mode-setting select:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
 }
 
 .primary-button,
