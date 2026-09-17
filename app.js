@@ -241,7 +241,9 @@ function bindEvents() {
 function buildBundleFromJson(fileName, jsonData, hash) {
   const entries = jsonData.map((row, index) => {
     const entry = { searchAliases: [], extras: [] };
+    entry.replacements = Array.isArray(row._replacements) ? row._replacements.filter(v => typeof v === 'string') : [];
     for (const [col, val] of Object.entries(row)) {
+      if (col === '_replacements') continue;
       if (isCostField(col)) continue; // Defense in depth; costs never enter normal search/copy data.
       const key = JSON_FIELD_MAP[col];
       const strVal = val === null || val === undefined ? "" : String(val);
@@ -333,7 +335,7 @@ function applySearch(term) {
   const normalized = normalizeForCompare(term);
   const tokens = buildSearchTokens(term);
   state.filteredEntries = !normalized
-    ? state.entries
+    ? state.entries.filter(entry => !entry.replacements?.length)
     : state.entries.filter((entry) => entryMatchesSearch(entry, normalized, tokens, state.searchMode));
 
   renderResults();
@@ -487,7 +489,7 @@ function renderResults() {
 
   refs.resultsTitle.textContent = hasSearch
     ? `找到 ${total} 筆符合資料`
-    : `共 ${state.entries.length} 筆品項`;
+    : `共 ${state.entries.filter(entry => !entry.replacements?.length).length} 筆品項`;
   refs.resultsSubtitle.textContent =
     total > MAX_RESULTS_RENDER
       ? `為了讓手機操作更順，先顯示前 ${MAX_RESULTS_RENDER} 筆結果。`
@@ -513,6 +515,7 @@ function renderResults() {
 }
 
 function renderCard(entry) {
+  if (entry.replacements?.length) return `<article class="result-card"><p class="section-label">舊型號 · 請改查替代產品</p><p class="result-code">${escapeHtml(entry.sku)}</p><p class="result-name">${escapeHtml(entry.productName)}</p><p class="card-note">此型號已移出目前料檔，不再提供舊價格。請選擇下列替代型號：</p><div class="card-footer">${entry.replacements.map(code => `<button class="ghost-button" data-replacement="${escapeHtml(code)}">${escapeHtml(code)} →</button>`).join('')}</div></article>`;
   return `
     <article class="result-card" data-entry-id="${escapeHtml(entry.id)}">
       <div class="result-card-top">
@@ -564,6 +567,12 @@ function renderPriceChip(entry, key, copyable = false) {
 }
 
 function onResultsClick(event) {
+  const replacement = event.target.closest('[data-replacement]');
+  if (replacement) {
+    refs.searchInput.value = replacement.dataset.replacement;
+    onSearchSubmit({preventDefault(){}});
+    return;
+  }
   const copyButton = event.target.closest("[data-copy-entry]");
   if (copyButton) {
     const entry = findEntry(copyButton.dataset.copyEntry);
@@ -992,6 +1001,7 @@ function commitFieldOrder(list) {
 
 function openDetail(entry, {audit=true} = {}) {
   if (!managed?.allowed) return;
+  if (entry.replacements?.length) { closeDetail({immediate:true}); return; }
   if(audit)managed.event('view', {sku:entry.sku});
   window.clearTimeout(detailCloseTimer);
   state.selectedEntry = entry;

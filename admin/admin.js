@@ -55,7 +55,8 @@ document.addEventListener('click',async e=>{
 document.addEventListener('change',e=>{if(e.target.id==='select-all')document.querySelectorAll('[data-request]').forEach(c=>c.checked=e.target.checked);});
 document.addEventListener('submit',e=>{if(e.target.id==='search'){e.preventDefault();query=e.target.elements.q.value.trim();offset=0;load();}});
 $('#refresh').onclick=load;$('#prev').onclick=()=>{offset=Math.max(0,offset-(page==='events'?100:200));load();};$('#next').onclick=()=>{offset+=page==='events'?100:200;load();};
-show('devices');
+const hashPage=()=>show(['events','requests','security'].includes(location.hash.slice(1))?location.hash.slice(1):'devices');
+window.addEventListener('hashchange',hashPage);hashPage();
 
 $('#cost-password-form').addEventListener('submit',async event=>{
  event.preventDefault();const form=event.currentTarget,button=form.querySelector('button');if(button.disabled)return;

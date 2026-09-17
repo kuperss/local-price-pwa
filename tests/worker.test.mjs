@@ -8,6 +8,7 @@ import worker from '../worker/index.js';
 import {createCostPasswordConfig,decryptCostEnvelope,COST_FORMAT} from '../cost-crypto.js';
 
 const sql=new DatabaseSync(':memory:');sql.exec(readFileSync(new URL('../worker/schema.sql',import.meta.url),'utf8'));
+sql.exec(readFileSync(new URL('../worker/catalog-schema.sql',import.meta.url),'utf8'));
 const DB={prepare(query){return {params:[],bind(...params){this.params=params;return this;},async first(){return sql.prepare(query).get(...this.params)||null;},async all(){return {results:sql.prepare(query).all(...this.params)};},async run(){const r=sql.prepare(query).run(...this.params);return {meta:{changes:Number(r.changes)}};}};},async batch(items){sql.exec('BEGIN');try{const result=await Promise.all(items.map(s=>s.run()));sql.exec('COMMIT');return result;}catch(e){sql.exec('ROLLBACK');throw e;}}};
 const pair=await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},false,['sign','verify']);
 const publicKey=await crypto.subtle.exportKey('jwk',pair.publicKey),id=crypto.randomUUID();
@@ -26,6 +27,9 @@ test('device authorization, signed requests, auditing and revocation end to end'
  try{
   assert.equal((await call('/')).status,200);
   assert.equal((await call('/admin/')).status,401);
+  assert.equal((await call('/admin/products.html')).status,401);
+  assert.equal((await call('/admin/api/products')).status,401);
+  assert.equal((await admin('products',undefined,'intruder@example.com')).status,403);
   assert.equal((await call('/admin/api/devices',{headers:{'Cf-Access-Jwt-Assertion':'forged'}})).status,401);
   assert.equal((await admin('devices',undefined,'intruder@example.com')).status,403);
   assert.equal((await call('/api/register',post({id,name:'測試使用者',publicKey}))).status,201);

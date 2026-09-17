@@ -11,11 +11,13 @@ import json
 import os
 import tempfile
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 import openpyxl
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cloud import Cloud, ROOT, deployment
+import catalog_sync
 
 BASE=ROOT.parent.parent/'價格查詢工具'/'價格查詢'
 COST_SCHEMA=[sql.strip() for sql in (ROOT/'worker/schema.sql').read_text(encoding='utf-8').split(';')
@@ -89,7 +91,7 @@ def split_costs(rows):
         if len(cost)>1:costs.append(cost)
     return prices,costs
 
-def publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid=0):
+def publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid=0,catalog_plan=None):
     # The scheduled job uses this checkout: create additive tables before any upload,
     # even when the new Worker has not been deployed yet. General prices remain usable.
     for sql in COST_SCHEMA:cloud.query(db,sql)
@@ -98,10 +100,18 @@ def publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid=0):
     prices,cost_rows=split_costs(rows)
     plain=json.dumps(prices,ensure_ascii=False,separators=(',',':')).encode()
     # Include freshness in version so users can verify the latest daily check even if prices are unchanged.
-    version=hashlib.sha256(b'split-costs-v1\n'+fetched.encode()+b'\n'+original).hexdigest()[:32]
+    revision=('\n'+catalog_plan['revision']).encode() if catalog_plan else b''
+    version=hashlib.sha256(b'split-costs-v1\n'+fetched.encode()+b'\n'+original+revision).hexdigest()[:32]
+    product_count=sum(not row.get('_replacements') for row in rows)
     previous=cloud.query(db,"SELECT value FROM settings WHERE key='current_bundle'")
-    if previous and previous[0]['value']==version:
-        print(f'PRICE_PWA_OK unchanged version={version} products={len(rows)}');return
+    prior_version=previous[0]['value'] if previous else ''
+    fingerprint=version
+    prior_report=cloud.query(db,'SELECT report FROM catalog_publications WHERE version=?',[prior_version]) if catalog_plan else []
+    unchanged=(json.loads(prior_report[0]['report']).get('fingerprint')==fingerprint) if prior_report else prior_version==version
+    if unchanged:
+        print(f'PRICE_PWA_OK unchanged version={prior_version} products={product_count}');return
+    # Independent staging IDs prevent two concurrent uploads from mixing encryption chunks/keys.
+    if catalog_plan:version=fingerprint[:20]+uuid.uuid4().hex[:12]
     cost_key=AESGCM.generate_key(bit_length=256);cost_iv=os.urandom(12)
     cost_plain=json.dumps(cost_rows,ensure_ascii=False,separators=(',',':')).encode()
     cost_cipher=AESGCM(cost_key).encrypt(cost_iv,cost_plain,('costs:'+version).encode())
@@ -109,22 +119,34 @@ def publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid=0):
     cost_chunks=[cost_encoded[i:i+80000] for i in range(0,len(cost_encoded),80000)]
     key=AESGCM.generate_key(bit_length=256);iv=os.urandom(12);cipher=AESGCM(key).encrypt(iv,plain,version.encode())
     encoded=base64.b64encode(cipher).decode();chunks=[encoded[i:i+80000] for i in range(0,len(encoded),80000)]
-    bundle={'format':'price-pwa-aes-gcm-v1','securityFormat':'split-costs-v1','version':version,'fetchedAt':fetched,'count':len(rows),'iv':base64.b64encode(iv).decode(),'hash':hashlib.sha256(cipher).hexdigest(),'cipher':encoded}
+    bundle={'format':'price-pwa-aes-gcm-v1','securityFormat':'split-costs-v1','version':version,'fetchedAt':fetched,'count':product_count,'iv':base64.b64encode(iv).decode(),'hash':hashlib.sha256(cipher).hexdigest(),'cipher':encoded}
     # This local .json intentionally contains no decryption key; keys require device authorization.
     private=ROOT/'data-private';atomic(private/'price-data.json',bundle)
-    atomic(private/'publish-report.json',{'fetched_at':fetched,'products':len(rows),'approved':len(resolved)+len(missing),'invalid_seed_rows':invalid,'missing_skus':missing})
+    atomic(private/'publish-report.json',{'fetched_at':fetched,'products':product_count,'aliases':len(rows)-product_count,'approved':len(resolved)+len(missing),'invalid_seed_rows':invalid,'missing_skus':missing,'blocked':catalog_plan['blocked'] if catalog_plan else []})
     for i,chunk in enumerate(chunks):cloud.query(db,'INSERT OR REPLACE INTO bundle_chunks VALUES(?,?,?)',[version,i,chunk])
-    cloud.query(db,'INSERT OR REPLACE INTO bundles(version,fetched_at,published_at,product_count,key_b64,iv_b64,content_hash,chunks) VALUES(?,?,?,?,?,?,?,?)',[version,fetched,stamp,len(rows),base64.b64encode(key).decode(),bundle['iv'],bundle['hash'],len(chunks)])
-    for status,items in [('included',resolved),('missing',missing)]:
-        for start in range(0,len(items),50):
-            batch=items[start:start+50];cloud.query(db,'UPDATE catalog SET resolution=?,resolved_at=?,included_version=? WHERE sku IN ('+','.join('?' for _ in batch)+')',[status,stamp,version if status=='included' else None,*batch])
+    cloud.query(db,'INSERT OR REPLACE INTO bundles(version,fetched_at,published_at,product_count,key_b64,iv_b64,content_hash,chunks) VALUES(?,?,?,?,?,?,?,?)',[version,fetched,stamp,product_count,base64.b64encode(key).decode(),bundle['iv'],bundle['hash'],len(chunks)])
     for i,chunk in enumerate(cost_chunks):
         cloud.query(db,'INSERT OR REPLACE INTO cost_chunks VALUES(?,?,?)',[version,i,chunk])
     cloud.query(db,'INSERT OR REPLACE INTO cost_bundles VALUES(?,?,?,?,?,?)',
                 [version,base64.b64encode(cost_key).decode(),base64.b64encode(cost_iv).decode(),hashlib.sha256(cost_cipher).hexdigest(),len(cost_chunks),len(cost_rows)])
     # Publish last: interrupted upload cannot replace the last complete version.
-    cloud.query(db,"INSERT INTO settings VALUES('current_bundle',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[version])
-    print(f'PRICE_PWA_OK version={version} products={len(rows)} approved={len(resolved)+len(missing)} missing={len(missing)} fetched_at={fetched}')
+    if catalog_plan:
+        for start in range(0,len(resolved),200):
+            cloud.query(db,'INSERT OR IGNORE INTO catalog_members(version,sku) SELECT ?,value FROM json_each(?)',[version,json.dumps(resolved[start:start+200])])
+        report={'blocked':catalog_plan['blocked'],'missing':missing,'aliases':len(catalog_plan['aliases']),'fingerprint':fingerprint}
+        cloud.query(db,'INSERT OR REPLACE INTO catalog_publications VALUES(?,?,?)',[version,catalog_plan['revision'],json.dumps(report,ensure_ascii=False)])
+        published=cloud.query(db,"""INSERT INTO settings(key,value) SELECT 'current_bundle',?
+          WHERE (SELECT value FROM settings WHERE key='catalog_revision')=?
+          AND COALESCE((SELECT value FROM settings WHERE key='current_bundle'),'')=?
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value RETURNING value""",[version,catalog_plan['revision'],prior_version])
+        if not published:raise ValueError('Catalog changed during upload; previous bundle retained. Retry next publish.')
+    else:
+        cloud.query(db,"INSERT INTO settings VALUES('current_bundle',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[version])
+    # Legacy request-screen hints follow the successful pointer, never an interrupted upload.
+    for status,items in [('included',resolved),('missing',missing)]:
+        for start in range(0,len(items),50):
+            batch=items[start:start+50];cloud.query(db,'UPDATE catalog SET resolution=?,resolved_at=?,included_version=? WHERE sku IN ('+','.join('?' for _ in batch)+')',[status,stamp,version if status=='included' else None,*batch])
+    print(f'PRICE_PWA_OK version={version} products={product_count} aliases={len(rows)-product_count} approved={len(resolved)+len(missing)} missing={len(missing)} fetched_at={fetched}')
 
 
 def main():
@@ -144,9 +166,15 @@ def main():
         for start in range(0,len(seeds),25):
             batch=seeds[start:start+25];cloud.query(db,'INSERT OR IGNORE INTO catalog(sku,source,approved_at) VALUES '+','.join("(?,'seed',?)" for _ in batch),[v for code in batch for v in (code,stamp)])
         cloud.query(db,"INSERT OR IGNORE INTO settings VALUES('seed_initialized',?)",[stamp])
-    codes=[r['sku'] for r in cloud.query(db,'SELECT sku FROM catalog ORDER BY sku')]
-    rows,resolved,missing=build(payload,codes)
-    publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid)
+    catalog_sync.sync_metadata(cloud,db,payload)
+    publication=catalog_sync.plan(cloud,db,payload)
+    rows,resolved,missing=build(payload,publication['codes'])
+    # Never silently drop a formerly published product because a source row vanished.
+    live={r['sku'] for r in cloud.query(db,"SELECT sku FROM catalog_members WHERE version=(SELECT value FROM settings WHERE key='current_bundle')")}
+    unsafe=set(missing)&(live|{r['sku'] for r in publication['blocked']})
+    if unsafe:raise ValueError('Previously published/retained products missing from cache; previous bundle retained: '+', '.join(sorted(unsafe)))
+    rows.extend(publication['aliases'])
+    publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid,publication)
 
 if __name__=='__main__':
     try:main()

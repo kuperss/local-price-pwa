@@ -13,6 +13,8 @@ def main():
     dbid=db['uuid']
     for sql in (ROOT/'worker/schema.sql').read_text(encoding='utf-8').split(';'):
         if sql.strip():c.query(dbid,sql)
+    from catalog_sync import setup
+    setup(c,dbid)
     subdomain=c.api('workers/subdomain')['subdomain']
     hostname=f'{NAME}.{subdomain}.workers.dev'
     # Existing account's Access domain, verified from mobile-query's login redirect.

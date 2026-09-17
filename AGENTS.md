@@ -41,6 +41,22 @@
 
 ## 日常操作與安全
 
+- v55 獨立「產品清單管理」：`/admin/products.html`，取代舊唯讀「更新清單」入口。
+  詳細資料模型、保護規則、驗收與遷移見 HANDOFF 的 v55 章節；不要只憑對話接手。
+- **實際可用量 = 出貨可用量 + A2外倉**，不含在途；負值保留，缺值／非數字為未知，不當 0。
+  售架無量用 `<=0`，使用者指定「有售轉且零庫存」用 `=0`。
+- 清單管理只改 PWA 納入範圍、備註及手動替代關係，不修改 ERP 品名／狀態／庫存。
+  移出為可恢復停用，不刪 catalog 歷史，不因售架／停產自動移除產品。
+- `catalog_rules` 記錄期望狀態；`catalog_members` 配合 `current_bundle` 才代表實際發布狀態。
+  不得把已儲存的增減誤報為已發布。每日既有 publish_data.py 會同步管理索引再發布，不另排程。
+- 完整產品索引只存白名單 metadata，不含價格與受保護欄位，所有管理路由仍經 Access 驗證。
+  `scripts/catalog_sync.py` 可單獨初始化／更新索引，保留快取原始 fetched_at，不發布價格。
+- 售轉串接僅依 ERP 與管理員手動關係，不猜測料號版次；允許一對多，阻擋新手動循環。
+  「加入替代型號並移出舊品」須新型號可發布才移出舊品，否則保留舊品並回報。
+  移出後的 `_replacements` 舊料號導向只含型號／品名／替代清單，絕不保留舊價或受保護資料。
+- 改清單或發布器須跑 `npm test` 及 `py -3.10 -m unittest discover -s tests -p 'test_*.py'`，
+  涵蓋大清單分頁、100 筆批次、修訂衝突、快照、加密與原子發布；並跑 BI selftest。
+
 - 每日 Windows 排程在另一 repo 的 `數據分析/tools/daily_mobile.ps1`，不要另外建立重複排程。
 - 「更新產品快取／更新産品快取」指執行另一 repo 的 V36 `--refresh-cache`，不是只開 GUI；V35 不動。
 - `scripts/publish_data.py` 只發布料檔；`npm run deploy` 發布程式與頁面，不會更新產品。

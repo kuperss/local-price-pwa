@@ -1,4 +1,5 @@
 import {createRemoteJWKSet,jwtVerify} from 'jose';
+import {catalogApi} from './catalog.js';
 import {COST_FORMAT,validCostConfig,wrapCostKey} from '../cost-crypto.js';
 const enc=new TextEncoder();
 const json=(obj,status=200)=>Response.json(obj,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
@@ -109,6 +110,7 @@ async function api(request,env,url){
  fail(404,'找不到功能');
 }
 async function adminApi(request,env,url,data,actor){
+ if(url.pathname==='/admin/api/products'||url.pathname.startsWith('/admin/api/products/'))return catalogApi(request,env.DB,url,data,actor);
  const path=url.pathname.slice('/admin/api/'.length), offset=Math.max(0,Number.parseInt(url.searchParams.get('offset')||'0')||0);
  const log=(action,target)=>env.DB.prepare('INSERT INTO admin_audit VALUES(?,?,?,?,?)').bind(crypto.randomUUID(),actor,action,target,now());
  if(path==='cost-password'&&request.method==='GET'){
@@ -139,9 +141,10 @@ async function adminApi(request,env,url,data,actor){
   const statements=[];
   for(const id of data.ids){
    const r=await env.DB.prepare('SELECT sku FROM requests WHERE id=?').bind(id).first();if(!r) fail(404,'找不到申請');
-   if(data.status==='approved') statements.push(env.DB.prepare("INSERT OR IGNORE INTO catalog(sku,source,approved_at) VALUES(?,'request',?)").bind(r.sku,now()));
+   if(data.status==='approved') statements.push(env.DB.prepare("INSERT OR IGNORE INTO catalog(sku,source,approved_at) VALUES(?,'request',?)").bind(r.sku,now()),env.DB.prepare("INSERT INTO catalog_rules(sku,active,updated_at,actor) VALUES(?,1,?,?) ON CONFLICT(sku) DO UPDATE SET active=1,replace_old=0,updated_at=excluded.updated_at,actor=excluded.actor").bind(r.sku,now(),actor));
    statements.push(env.DB.prepare('UPDATE requests SET status=?,reviewed_at=?,reviewed_by=? WHERE id=?').bind(data.status,now(),actor,id),log(`request_${data.status}`,id));
   }
+  if(data.status==='approved')statements.push(env.DB.prepare("INSERT INTO settings VALUES('catalog_revision',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(crypto.randomUUID()));
   await env.DB.batch(statements);return json({ok:true});
  }
  if(path==='catalog') return json((await env.DB.prepare('SELECT * FROM catalog ORDER BY approved_at DESC,sku LIMIT 200 OFFSET ?').bind(offset).all()).results);
