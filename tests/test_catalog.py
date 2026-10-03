@@ -104,7 +104,8 @@ class CatalogTests(unittest.TestCase):
         snapshots=[];queries=[];original=self.cloud.query
         def recording(db,sql,params=None):
             queries.append((sql,params));return original(db,sql,params)
-        with patch.object(self.cloud,'query',recording):
+        # Force the full immutable-snapshot path; the delta path has its own tests.
+        with patch.object(self.cloud,'query',recording),patch.object(catalog,'DELTA_MAX_BYTES',0):
             for day in (17,18,19):
                 p['fetched_at']=f'2026-09-{day}T10:00:00'
                 p['master']['K00000']['IMA02']=str(day)
@@ -117,7 +118,8 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual([r['snapshot'] for r in kept],sorted(snapshots[-2:]))
         # Capture one further sync to prove cursor traversal and primary-key deletion.
         queries.clear();p['fetched_at']='2026-09-20T10:00:00';p['master']['K00000']['IMA02']='20'
-        with patch.object(self.cloud,'query',recording):catalog.sync_metadata(self.cloud,'',p)
+        with patch.object(self.cloud,'query',recording),patch.object(catalog,'DELTA_MAX_BYTES',0):
+            catalog.sync_metadata(self.cloud,'',p)
         pages=[(sql,params) for sql,params in queries if 'AND sku>?' in sql]
         self.assertEqual([params[1] for _,params in pages],['','K00999','K01999'])
         self.assertTrue(all('OFFSET' not in sql for sql,_ in queries))
@@ -158,13 +160,13 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(catalog.sync_metadata(self.cloud,'',p),first)
             self.assertFalse(any('FROM product_metadata' in sql for sql in queries))
         p['fetched_at']='2026-09-19T10:00:00';p['master']['NEW']['出貨可用量']='2'
-        second=catalog.sync_metadata(self.cloud,'',p)
-        self.assertNotEqual(second,first)
-        self.assertEqual(original('',"SELECT changes FROM product_metadata WHERE snapshot=? AND sku='NEW'",[second])[0]['changes'],'新歸零')
+        # Changed stock updates the live snapshot in place; freshness moves with it.
+        self.assertEqual(catalog.sync_metadata(self.cloud,'',p),first)
+        self.assertEqual(original('',"SELECT changes FROM product_metadata WHERE snapshot=? AND sku='NEW'",[first])[0]['changes'],'新歸零')
+        self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),'2026-09-19T10:00:00')
         p['fetched_at']='2026-09-20T10:00:00'
-        third=catalog.sync_metadata(self.cloud,'',p)
-        self.assertNotEqual(third,second)
-        self.assertEqual(original('',"SELECT changes FROM product_metadata WHERE snapshot=? AND sku='NEW'",[third])[0]['changes'],'')
+        self.assertEqual(catalog.sync_metadata(self.cloud,'',p),first)
+        self.assertEqual(original('',"SELECT changes FROM product_metadata WHERE snapshot=? AND sku='NEW'",[first])[0]['changes'],'')
 
     def test_same_snapshot_reuse_cannot_overwrite_concurrent_freshness(self):
         p=payload();first=catalog.sync_metadata(self.cloud,'',p);original=self.cloud.query
@@ -179,5 +181,65 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(catalog.setting(self.cloud,'','product_snapshot'),first)
         self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),'newer-time')
 
+
+    def _upserts(self,run):
+        """Run sync_metadata, return the JSON rows each product_metadata write carried."""
+        original=self.cloud.query;writes=[]
+        def recording(db,sql,params=None):
+            if 'INTO product_metadata' in sql:writes.append(json.loads(params[1]))
+            return original(db,sql,params)
+        with patch.object(self.cloud,'query',recording):result=run()
+        return result,writes
+
+    def test_delta_writes_only_changed_rows_in_one_statement(self):
+        p={'fetched_at':'2026-09-17T10:00:00','master':{
+            f'K{i:05}':{'IMA01':f'K{i:05}','出貨可用量':'1','A2外倉':'0'} for i in range(2305)}}
+        first=catalog.sync_metadata(self.cloud,'',p)
+        p['fetched_at']='2026-09-18T10:00:00'
+        p['master']['K00007']['出貨可用量']='5';p['master']['K01234']['IMA02']='改名'
+        p['master']['K99999']={'IMA01':'K99999','出貨可用量':'3','A2外倉':'0'}
+        snap,writes=self._upserts(lambda:catalog.sync_metadata(self.cloud,'',p))
+        self.assertEqual(snap,first)
+        self.assertEqual(len(writes),1)
+        self.assertEqual(sorted(r['sku'] for r in writes[0]),['K00007','K01234','K99999'])
+        rows={r['sku']:r for r in self.cloud.query('', 'SELECT sku,shipping,name FROM product_metadata WHERE snapshot=?',[first])}
+        self.assertEqual(len(rows),2306)
+        self.assertEqual(rows['K00007']['shipping'],5);self.assertEqual(rows['K01234']['name'],'改名')
+        self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),'2026-09-18T10:00:00')
+        self.assertEqual(catalog.setting(self.cloud,'','product_metadata_input')[:19],'2026-09-18T10:00:00')
+
+    def test_removed_sku_or_oversized_delta_builds_full_snapshot(self):
+        p=payload();first=catalog.sync_metadata(self.cloud,'',p)
+        p['fetched_at']='2026-09-18T10:00:00';del p['master']['UNK']
+        second=catalog.sync_metadata(self.cloud,'',p)
+        self.assertNotEqual(second,first)
+        self.assertEqual(len(self.cloud.query('', 'SELECT sku FROM product_metadata WHERE snapshot=?',[second])),2)
+        p['fetched_at']='2026-09-19T10:00:00';p['master']['NEW']['IMA02']='x'
+        with patch.object(catalog,'DELTA_MAX_BYTES',10):third=catalog.sync_metadata(self.cloud,'',p)
+        self.assertNotIn(third,(first,second))
+
+    def test_delta_lost_claim_writes_nothing(self):
+        p=payload();first=catalog.sync_metadata(self.cloud,'',p);original=self.cloud.query
+        p['fetched_at']='2026-09-18T10:00:00';p['master']['NEW']['IMA02']='changed'
+        def competing(db,sql,params=None):
+            if 'INTO product_metadata' in sql:   # another publisher takes over after our claim
+                original(db,"UPDATE settings SET value='other-input' WHERE key='product_metadata_input'")
+            return original(db,sql,params)
+        with patch.object(self.cloud,'query',competing),self.assertRaisesRegex(ValueError,'Metadata changed'):
+            catalog.sync_metadata(self.cloud,'',p)
+        self.assertEqual(original('',"SELECT name FROM product_metadata WHERE snapshot=? AND sku='NEW'",[first])[0]['name'],'新品')
+        self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),'2026-09-17T10:00:00')
+
+    def test_interrupted_delta_recovers_next_run(self):
+        p=payload();first=catalog.sync_metadata(self.cloud,'',p);original=self.cloud.query
+        p['fetched_at']='2026-09-18T10:00:00';p['master']['NEW']['IMA02']='changed'
+        def failing(db,sql,params=None):
+            if 'INTO product_metadata' in sql:raise RuntimeError('network')
+            return original(db,sql,params)
+        with patch.object(self.cloud,'query',failing),self.assertRaises(RuntimeError):catalog.sync_metadata(self.cloud,'',p)
+        self.assertEqual(original('',"SELECT name FROM product_metadata WHERE snapshot=? AND sku='NEW'",[first])[0]['name'],'新品')
+        self.assertEqual(catalog.sync_metadata(self.cloud,'',p),first)
+        self.assertEqual(original('',"SELECT name FROM product_metadata WHERE snapshot=? AND sku='NEW'",[first])[0]['name'],'changed')
+        self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),'2026-09-18T10:00:00')
 
 if __name__=='__main__':unittest.main()

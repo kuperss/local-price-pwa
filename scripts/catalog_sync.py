@@ -13,6 +13,9 @@ from cloud import ROOT, Cloud, deployment, measured_phase
 
 SCHEMA=(ROOT/'worker/catalog-schema.sql').read_text(encoding='utf-8')
 FIELDS=['sku','name','sale','discontinued','shipping','a2','available','incoming','eta','transfer','changes','issue']
+# In-place delta must fit ONE statement (one JSON bind) so it stays atomic. D1 allows
+# 2 MB strings; keep headroom. Larger deltas fall back to a full immutable snapshot.
+DELTA_MAX_BYTES=900_000
 def canonical(value):
     return unicodedata.normalize('NFKC',str(value or '')).strip().upper()
 
@@ -107,6 +110,28 @@ def sync_metadata(cloud,db,payload):
                         'product_metadata_input':input_version},current,previous_input)
         print(f'CATALOG_METADATA_OK reused products={len(rows)} fetched_at={payload["fetched_at"]}')
         return current
+    # Daily stock movement touches ~2,500 of ~29,000 SKUs. Rewriting the whole snapshot
+    # cost ~87,000 rows_written/day (87% of the D1 free 100,000), so update only changed
+    # rows of the live snapshot. Removed SKUs or an oversized delta use the full path.
+    if current and not previous.keys()-generated.keys():
+        changed=[r for code,r in generated.items() if previous.get(code)!=r]
+        batch=json.dumps(changed,ensure_ascii=False,separators=(',',':'))
+        if len(batch.encode())<=DELTA_MAX_BYTES:
+            # Claim first: the guarded upsert only lands while this run still owns the
+            # input marker, so two publishers cannot interleave rows. The upsert is one
+            # statement (atomic); an interruption leaves the previous complete rows.
+            claim='claim-'+uuid.uuid4().hex[:12]
+            switch_metadata(cloud,db,{'product_metadata_input':claim},current,previous_input)
+            cloud.query(db,'INSERT INTO product_metadata(snapshot,'+','.join(FIELDS)+') SELECT ?,'+
+                        ','.join("json_extract(value,'$."+f+"')" for f in FIELDS)+' FROM json_each(?)'
+                        " WHERE (SELECT value FROM settings WHERE key='product_snapshot')=?"
+                        " AND (SELECT value FROM settings WHERE key='product_metadata_input')=?"
+                        ' ON CONFLICT(snapshot,sku) DO UPDATE SET '+
+                        ','.join(f+'=excluded.'+f for f in FIELDS if f!='sku'),[current,batch,current,claim])
+            switch_metadata(cloud,db,{'product_fetched_at':payload['fetched_at'],
+                            'product_metadata_input':input_version},current,claim)
+            print(f'CATALOG_METADATA_OK delta changed={len(changed)} products={len(rows)} fetched_at={payload["fetched_at"]}')
+            return current
     fields=FIELDS
     # Separate concurrent staging even for the same input; computed change flags can
     # differ when two runs started from different baselines. Only the CAS winner is live.
