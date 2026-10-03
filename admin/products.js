@@ -145,7 +145,9 @@ function openBulk(){
  resetBulk(rows.length?`已帶入勾選的 ${rows.length} 筆（ERP 售轉／已設定的替代型號），請確認後按「檢查」。`:'貼上或輸入取代清單後按「檢查」。');
  $('#bulk-dialog').showModal();
 }
-function resetBulk(text){++bulkSerial;bulk=null;$('#confirm-bulk').disabled=true;$('#confirm-bulk').textContent='確認取代';$('#bulk-preview').innerHTML='';$('#bulk-message').textContent=text;}
+// Confirm stays clickable whenever there is text: pressing it before 「檢查」 runs the check first
+// (a greyed-out button that silently does nothing looked broken to the user).
+function resetBulk(text){++bulkSerial;bulk=null;$('#confirm-bulk').disabled=!$('#bulk-codes').value.trim();$('#confirm-bulk').textContent='確認取代';$('#bulk-preview').innerHTML='';$('#bulk-message').textContent=text;}
 async function previewBulk(){
  const text=$('#bulk-codes').value,token=++bulkSerial,pairs=parseBulk(text);
  bulk=null;$('#confirm-bulk').disabled=true;$('#bulk-preview').innerHTML='';
@@ -186,7 +188,13 @@ $('#bulk-codes').oninput=()=>resetBulk('清單已修改，請重新檢查。');
 $('#check-bulk').onclick=previewBulk;
 $('#bulk-dialog').addEventListener('close',()=>{++bulkSerial;bulk=null;});
 $('#confirm-bulk').onclick=async()=>{
- if(!bulk||$('#confirm-bulk').disabled)return;$('#confirm-bulk').disabled=true;
+ if($('#confirm-bulk').disabled)return;
+ if(!bulk){
+  $('#confirm-bulk').disabled=true;await previewBulk();
+  if(bulk)$('#bulk-message').textContent+=` 請確認上面的清單後，再按一次「確認取代 ${bulk.pairs.length} 筆」。`;
+  return;
+ }
+ $('#confirm-bulk').disabled=true;
  try{if(await apply('replace_many',bulk.pairs.map(p=>p.sku),{pairs:bulk.pairs.map(p=>({sku:p.sku,targets:p.targets}))},bulk.revision))$('#bulk-dialog').close();}
  catch(e){$('#bulk-message').textContent=e.message;$('#confirm-bulk').disabled=false;}
 };
