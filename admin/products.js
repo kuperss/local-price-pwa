@@ -133,4 +133,61 @@ $('#confirm-replacement').onclick=async()=>{
  try{if(await apply('replace',[replacing.sku],{targets:replacementPreview.map(r=>r.sku)},replacing.revision))$('#replacement-dialog').close();}
  catch(e){$('#replacement-message').textContent=e.message;}
 };
+// ── 批次取代：N 筆「舊→新」一次預覽、一次儲存（伺服器 replace_many，一次 revision，清單只重讀一次）
+const BULK_MAX=50;let bulk=null,bulkSerial=0;
+const parseBulk=text=>text.split(/\r?\n/).map((raw,i)=>{
+ const parts=raw.replace(/#.*/,'').split(/\s*(?:→|->|=>)\s*|[\s,，;；]+/).map(s=>s.normalize('NFKC').trim().toUpperCase()).filter(Boolean);
+ return parts.length?{line:i+1,sku:parts[0],targets:[...new Set(parts.slice(1))]}:null;
+}).filter(Boolean);
+function openBulk(){
+ const rows=(result?.rows||[]).filter(r=>selected.has(r.sku));
+ $('#bulk-codes').value=rows.map(r=>[r.sku,replacementCodes(r).join(',')].filter(Boolean).join(' ')).join('\n');
+ resetBulk(rows.length?`已帶入勾選的 ${rows.length} 筆（ERP 售轉／已設定的替代型號），請確認後按「檢查」。`:'貼上或輸入取代清單後按「檢查」。');
+ $('#bulk-dialog').showModal();
+}
+function resetBulk(text){++bulkSerial;bulk=null;$('#confirm-bulk').disabled=true;$('#confirm-bulk').textContent='確認取代';$('#bulk-preview').innerHTML='';$('#bulk-message').textContent=text;}
+async function previewBulk(){
+ const text=$('#bulk-codes').value,token=++bulkSerial,pairs=parseBulk(text);
+ bulk=null;$('#confirm-bulk').disabled=true;$('#bulk-preview').innerHTML='';
+ if(!pairs.length){$('#bulk-message').textContent='沒有可處理的行。';return;}
+ if(pairs.length>BULK_MAX){$('#bulk-message').textContent=`一次最多 ${BULK_MAX} 筆，目前 ${pairs.length} 筆，請分批。`;return;}
+ const all=[...new Set(pairs.flatMap(p=>[p.sku,...p.targets]))];
+ if(all.length>100){$('#bulk-message').textContent=`這批涉及 ${all.length} 個型號，超過 100 個，請分批。`;return;}
+ $('#bulk-message').textContent='檢查中…';
+ try{
+  const data=await api('/preview',{codes:all});if(token!==bulkSerial||text!==$('#bulk-codes').value)return;
+  const info=new Map(data.rows.map(r=>[r.sku,r])),olds=new Map();
+  for(const p of pairs)if(!olds.has(p.sku))olds.set(p.sku,p.line);
+  let bad=0;
+  $('#bulk-preview').innerHTML=pairs.map(p=>{
+   const o=info.get(p.sku)||{sku:p.sku,missing:1},problems=[];
+   if(olds.get(p.sku)!==p.line)problems.push(`原型號與第 ${olds.get(p.sku)} 行重複`);
+   if(!o.tracked)problems.push('原型號不在產品清單，請先加入');
+   if(!p.targets.length)problems.push('未指定替代型號');
+   if(p.targets.length>20)problems.push('替代型號最多 20 個');
+   for(const t of p.targets){
+    if(t===p.sku)problems.push('替代型號與原型號相同');
+    else if(olds.has(t))problems.push(`${t} 在這批也是原型號，請分兩批處理`);
+    if(info.get(t)?.missing)problems.push(`查無來源：${t}`);
+   }
+   if(problems.length)bad++;
+   const targets=p.targets.map(t=>{const r=info.get(t)||{sku:t,missing:1};return `<div class="bulk-target"><strong>${esc(t)}</strong>${r.missing?'<span class="replacement-stock unknown">查無來源</span>':replacementStock(r)}<small>${esc(r.name||'')}</small></div>`;}).join('')||'<small>—</small>';
+   return `<div class="bulk-row${problems.length?' bad':''}"><div><strong>${esc(p.sku)}</strong><small>第 ${p.line} 行 · ${esc(o.name||'來源查無資料')} · ${states[o.state]||'未加入'}</small></div><span class="arrow">→</span><div class="bulk-targets">${targets}</div>${problems.length?`<span class="bulk-problem">${esc(problems.join('；'))}</span>`:''}</div>`;
+  }).join('');
+  if(bad){$('#bulk-message').textContent=`${pairs.length} 筆中有 ${bad} 筆需要修正（紅底），修正後重新檢查；整批沒問題才能儲存。`;return;}
+  bulk={pairs,revision:data.revision};
+  const empty=pairs.filter(p=>p.targets.some(t=>{const r=info.get(t);return r.available==null||r.available<=0;})).length;
+  $('#confirm-bulk').textContent=`確認取代 ${pairs.length} 筆`;$('#confirm-bulk').disabled=false;
+  $('#bulk-message').textContent=`${pairs.length} 筆都可取代。`+(empty?`注意：其中 ${empty} 筆的替代品目前無可用量或庫存未知。`:'');
+ }catch(e){$('#bulk-message').textContent=e.message;}
+}
+$('#batch-replace').onclick=openBulk;
+$('#bulk-codes').oninput=()=>resetBulk('清單已修改，請重新檢查。');
+$('#check-bulk').onclick=previewBulk;
+$('#bulk-dialog').addEventListener('close',()=>{++bulkSerial;bulk=null;});
+$('#confirm-bulk').onclick=async()=>{
+ if(!bulk||$('#confirm-bulk').disabled)return;$('#confirm-bulk').disabled=true;
+ try{if(await apply('replace_many',bulk.pairs.map(p=>p.sku),{pairs:bulk.pairs.map(p=>({sku:p.sku,targets:p.targets}))},bulk.revision))$('#bulk-dialog').close();}
+ catch(e){$('#bulk-message').textContent=e.message;$('#confirm-bulk').disabled=false;}
+};
 controls();filterButtons();load();

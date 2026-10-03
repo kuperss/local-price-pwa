@@ -190,3 +190,52 @@ test('list revalidation returns 304 without list queries until data or catalog c
   assert.equal(after.status,200);assert.notEqual(after.headers.get('ETag'),tag);
  }finally{sql.close();}
 });
+
+test('replace_many saves every pair in one atomic batch with one revision bump',async()=>{
+ const {sql,call}=fixture();try{
+  const rev=(await call()).revision;
+  const res=await call('/apply',{action:'replace_many',pairs:[{sku:'OLD',targets:['NEXT']},{sku:'CLEAR',targets:['NEXT','NEW']}],revision:rev});
+  assert.ok(res.ok);assert.notEqual(res.revision,rev);
+  const rule=sku=>sql.prepare('SELECT active,targets,replace_old FROM catalog_rules WHERE sku=?').get(sku);
+  assert.deepEqual({...rule('OLD')},{active:0,targets:'["NEXT"]',replace_old:1});
+  assert.deepEqual({...rule('CLEAR')},{active:0,targets:'["NEXT","NEW"]',replace_old:1});
+  assert.equal(rule('NEXT').active,1);assert.equal(rule('NEW').active,1);
+  // Shared target NEXT gets one rule row but one audit line per original.
+  const audits=sql.prepare("SELECT action,COUNT(*) n FROM admin_audit GROUP BY action ORDER BY action").all().map(r=>[r.action,r.n]);
+  assert.deepEqual(audits,[['catalog_add_target',3],['catalog_replace',2]]);
+  assert.equal(sql.prepare("SELECT COUNT(*) n FROM settings WHERE key='catalog_revision'").get().n,1);
+ }finally{sql.close();}
+});
+
+test('replace_many rejects the whole batch on any invalid pair and writes nothing',async()=>{
+ const {sql,call}=fixture();try{
+  const rev=(await call()).revision;
+  const reject=async(pairs,text)=>{
+   await assert.rejects(call('/apply',{action:'replace_many',pairs,revision:rev}),e=>e.status===400&&e.message.includes(text));
+   assert.equal(sql.prepare('SELECT COUNT(*) n FROM catalog_rules').get().n,0);
+   assert.equal(sql.prepare('SELECT COUNT(*) n FROM admin_audit').get().n,0);
+  };
+  await reject([{sku:'OLD',targets:['NEXT']},{sku:'CLEAR',targets:['GONE']}],'查無來源');
+  await reject([{sku:'OLD',targets:['NEXT']},{sku:'NEW',targets:['NEXT']}],'請先加入清單');
+  await reject([{sku:'OLD',targets:['CLEAR']},{sku:'CLEAR',targets:['NEXT']}],'同時是原型號與替代型號');
+  await reject([{sku:'OLD',targets:['NEXT']},{sku:'OLD',targets:['NEW']}],'重複');
+  await reject([{sku:'OLD',targets:[]}],'請指定替代型號');
+  await reject([],'1～50');
+  // A direct two-way swap inside one batch is rejected before any cycle walk.
+  sql.prepare('INSERT INTO catalog(sku,source,approved_at) VALUES(?,?,?)').run('NEXT','seed','2026-09-17');
+  await reject([{sku:'OLD',targets:['NEW']},{sku:'NEXT',targets:['OLD']}],'同時是原型號與替代型號');
+ }finally{sql.close();}
+});
+
+test('replace_many catches a cycle formed by this batch plus stored relations',async()=>{
+ const {sql,call}=fixture();try{
+  // Stored ERP transfers: NEW→NEXT (fixture) and NEG→CLEAR (set here). Originals and targets stay disjoint.
+  sql.prepare('INSERT INTO catalog(sku,source,approved_at) VALUES(?,?,?)').run('NEXT','seed','2026-09-17');
+  sql.prepare("UPDATE product_metadata SET transfer='CLEAR' WHERE sku='NEG'").run();
+  const rev=(await call()).revision;
+  // CLEAR→NEW→(stored)NEXT→(batch)NEG→(stored)CLEAR : a cycle no single pair can see alone.
+  await assert.rejects(call('/apply',{action:'replace_many',pairs:[{sku:'CLEAR',targets:['NEW']},{sku:'NEXT',targets:['NEG']}],revision:rev}),
+   e=>e.status===400&&e.message.includes('循環'));
+  assert.equal(sql.prepare('SELECT COUNT(*) n FROM catalog_rules').get().n,0);
+ }finally{sql.close();}
+});

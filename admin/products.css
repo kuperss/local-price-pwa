@@ -5,3 +5,4 @@ nav a{text-decoration:none;padding:12px 16px;border-radius:8px;color:#d0ddd4;whi
 .attention-reasons div{border-left:2px solid #b9c9ae;padding-left:8px}
 .attention-reasons div+div{margin-top:6px}
 .neutral{color:var(--ink);font-weight:400}
+.bulk-row{display:grid;grid-template-columns:minmax(150px,1fr) 18px minmax(200px,1.6fr);gap:6px 12px;align-items:start;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}.bulk-row small{display:block;color:var(--muted);font-size:12px}.bulk-row .arrow{color:var(--muted);padding-top:2px}.bulk-row .bulk-targets{display:grid;gap:6px}.bulk-row .bulk-target{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.bulk-row .bulk-problem{grid-column:1/-1;color:#a43131;font-size:12px}.bulk-row.bad{background:#fff6f4}#bulk-preview{max-height:46vh;overflow:auto}#bulk-dialog .dialog-actions{flex-wrap:wrap}@media(max-width:600px){.bulk-row{grid-template-columns:1fr}.bulk-row .arrow{display:none}}

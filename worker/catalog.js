@@ -7,10 +7,15 @@ const fail=(status,message)=>{throw Object.assign(new Error(message),{status});}
 const normalize=value=>String(value??'').normalize('NFKC').trim().toUpperCase();
 const codes=value=>[...new Set((Array.isArray(value)?value:String(value??'').split(/[\n\r\t,，;；]+/)).map(normalize).filter(Boolean))];
 const valid=list=>list.length>0&&list.length<=100&&list.every(s=>s.length<=100&&/^[\x21-\x7e]+$/.test(s));
+// likely() returns its argument unchanged. It hides metadata columns from SQLite's LEFT JOIN
+// strength reduction: a filter such as available=0 otherwise turns the join inner and the
+// planner drives from all ~29,000 product_metadata rows instead of the ~1,900 tracked SKUs
+// (measured on production 2026-10-03: transfer_zero count 29,752 → 4,188 rows_read).
+const META=['name','sale','discontinued','shipping','a2','available','incoming','eta','transfer','changes','issue'];
 const catalogCte=universe=>`WITH universe AS (
  ${universe}
 ), items AS (
- SELECT u.sku,m.name,m.sale,m.discontinued,m.shipping,m.a2,m.available,m.incoming,m.eta,m.transfer,m.changes,m.issue,
+ SELECT u.sku,${META.map(f=>`likely(m.${f}) AS ${f}`).join(',')},
  m.sku IS NULL AS missing,c.sku IS NOT NULL AS tracked,c.source,c.approved_at,
  CASE WHEN c.sku IS NULL THEN 0 ELSE COALESCE(r.active,1) END AS active,
  COALESCE(r.note,'') note,COALESCE(r.targets,'[]') targets,COALESCE(r.replace_old,0) replace_old,
@@ -36,6 +41,25 @@ const product=async(db,sku)=>(await productMap(db,[sku])).get(sku);
 // Drive joins from the requested keys, never materialize the full source for a SKU lookup.
 const productMap=async(db,list)=>list.length?new Map((await all(db,lookupCte+'SELECT * FROM products',[JSON.stringify([...new Set(list)])])).map(r=>[r.sku,r])):new Map();
 const absent=sku=>({sku,missing:1,active:0,tracked:0,live:0,state:'outside',targets:'[]'});
+// Follow each item's new targets through ERP transfer + manual targets; reaching the item itself
+// is a cycle. All items advance together so one lookup serves a whole depth level (Workers Free
+// allows 50 D1 queries per request). Within a batch, other items' NEW targets replace their
+// stored ones, so A→B in this batch plus stored B→C plus C→A in this batch is caught.
+async function checkCycles(db,items){
+ const pending=new Map(items.length>1?items.map(i=>[i.code,i.targets]):[]),known=new Map();
+ const walks=items.filter(i=>i.targets.length).map(i=>({root:i.code,queue:[...i.targets],seen:new Set(),depth:0}));
+ while(walks.some(w=>w.queue.length)){
+  const need=[...new Set(walks.flatMap(w=>w.queue))].filter(c=>!known.has(c));
+  if(need.length){const found=await productMap(db,need);for(const c of need)known.set(c,found.get(c)||absent(c));}
+  for(const w of walks){
+   if(!w.queue.length)continue;
+   const level=[...new Set(w.queue)].filter(c=>!w.seen.has(c));w.queue=[];
+   if(level.includes(w.root))fail(400,'替代關係會形成循環，請先修正料號'+(items.length>1?'：'+w.root:''));
+   if(w.seen.size+level.length>100||w.depth++>=20)fail(400,'替代關係超過 100 個節點或 20 層，請先分批檢查');
+   for(const c of level){w.seen.add(c);const r=known.get(c);w.queue.push(...[r.transfer,...(pending.get(c)||JSON.parse(r.targets))].filter(Boolean));}
+  }
+ }
+}
 const caches=new WeakMap();
 // Entries are keyed by generation, so a publish or catalog edit is never served stale;
 // the TTL only bounds how long an unchanged result may be reused (user asked for 2 hours).
@@ -119,41 +143,57 @@ export async function catalogApi(request,rawDb,url,data,actor){
   return respond({rows,revision:s.catalog_revision||'0'});
  }
  if(request.method==='POST'&&path==='/apply'){
-  const list=codes(data.codes),action=data.action;
-  if(!valid(list)||!['add','remove','edit','replace','add_targets'].includes(action))fail(400,'操作或型號無效（每批最多 100 筆）');
-  if(['edit','replace','add_targets'].includes(action)&&list.length!==1)fail(400,'請逐筆設定替代型號');
-  const targets=codes(data.targets||[]);if(targets.length>20||targets.some(s=>!valid([s]))||targets.some(s=>list.includes(s)))fail(400,'替代型號不得等於原型號，最多 20 個');
-  if(['replace','add_targets'].includes(action)&&!targets.length)fail(400,'請指定替代型號');
-  if(['edit','replace','add_targets'].includes(action)&&targets.length){
-   let queue=[...targets],depth=0;const seen=new Set();
-   while(queue.length){
-    const level=[...new Set(queue)].filter(s=>!seen.has(s));queue=[];
-    if(level.includes(list[0]))fail(400,'替代關係會形成循環，請先修正料號');
-    if(seen.size+level.length>100||depth++>=20)fail(400,'替代關係超過 100 個節點或 20 層，請先分批檢查');
-    const found=await productMap(db,level);
-    for(const current of level){seen.add(current);const related=found.get(current)||absent(current);queue.push(...[related.transfer,...JSON.parse(related.targets)].filter(Boolean));}
+  const action=data.action;
+  // One entry per original SKU with its own targets. replace_many = N independent "replace"
+  // operations saved as ONE atomic batch: one revision bump, so the admin list reloads once.
+  let items;
+  if(action==='replace_many'){
+   const pairs=Array.isArray(data.pairs)?data.pairs:[];
+   if(!pairs.length||pairs.length>50)fail(400,'批次取代每次 1～50 筆');
+   items=pairs.map(p=>({code:normalize(p?.sku),targets:codes(p?.targets||[])}));
+   const olds=items.map(i=>i.code);
+   if(!valid(olds)||new Set(olds).size!==olds.length)fail(400,'原型號格式錯誤或重複');
+   for(const i of items){
+    if(!i.targets.length)fail(400,'請指定替代型號：'+i.code);
+    if(i.targets.length>20||i.targets.some(t=>!valid([t])))fail(400,'替代型號格式錯誤或超過 20 個：'+i.code);
+    // A SKU that is both an original and a target in one batch would get two conflicting
+    // rule rows in the same upsert (result depends on order), so it must go in separate batches.
+    const both=i.targets.find(t=>olds.includes(t));
+    if(both)fail(400,both===i.code?'替代型號不得等於原型號：'+i.code:both+' 在這批同時是原型號與替代型號，請分兩批處理');
    }
+   if(!valid([...new Set(items.flatMap(i=>[i.code,...i.targets]))]))fail(400,'這批涉及的型號超過 100 個，請分批處理');
+  }else{
+   const list=codes(data.codes);
+   if(!valid(list)||!['add','remove','edit','replace','add_targets'].includes(action))fail(400,'操作或型號無效（每批最多 100 筆）');
+   if(['edit','replace','add_targets'].includes(action)&&list.length!==1)fail(400,'請逐筆設定替代型號');
+   const targets=codes(data.targets||[]);if(targets.length>20||targets.some(s=>!valid([s]))||targets.some(s=>list.includes(s)))fail(400,'替代型號不得等於原型號，最多 20 個');
+   if(['replace','add_targets'].includes(action)&&!targets.length)fail(400,'請指定替代型號');
+   items=list.map(code=>({code,targets}));
   }
+  const kind=action==='replace_many'?'replace':action;
+  if(['edit','replace','add_targets'].includes(kind))await checkCycles(db,items);
+  const list=items.map(i=>i.code);
   const revision=s.catalog_revision||'0';if(data.revision!==revision)fail(409,'清單已被更新，請重新整理後再操作');
   const next=crypto.randomUUID(),stamp=new Date().toISOString();
-  const beforeRows=await productMap(db,[...list,...targets]);
+  const beforeRows=await productMap(db,[...new Set([...list,...items.flatMap(i=>i.targets)])]);
   const statements=[db.prepare(`INSERT INTO settings(key,value) VALUES('catalog_revision',CASE WHEN COALESCE((SELECT value FROM settings WHERE key='catalog_revision'),'0')=? THEN ? ELSE NULL END) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind(revision,next)];
-  const changes=[],audits=[];
-  for(const code of list){
+  const changes=[],audits=[],addedTargets=new Set();
+  for(const {code,targets} of items){
    const before=beforeRows.get(code)||absent(code);
-   if(['edit','replace','add_targets','remove'].includes(action)&&!before.tracked)fail(400,'請先加入清單再操作');
-   const active=action==='remove'||action==='replace'?0:action==='add'?1:before.active;
-   const note=action==='edit'?String(data.note||'').trim().slice(0,1000):before.note||'';
-   const manual=['edit','replace','add_targets'].includes(action)?JSON.stringify(targets):before.targets||'[]';
-   const replacement=action==='replace'?1:action==='add'||action==='remove'?0:before.replace_old||0;
+   if(['edit','replace','add_targets','remove'].includes(kind)&&!before.tracked)fail(400,'請先加入清單再操作'+(items.length>1?'：'+code:''));
+   const active=kind==='remove'||kind==='replace'?0:kind==='add'?1:before.active;
+   const note=kind==='edit'?String(data.note||'').trim().slice(0,1000):before.note||'';
+   const manual=['edit','replace','add_targets'].includes(kind)?JSON.stringify(targets):before.targets||'[]';
+   const replacement=kind==='replace'?1:kind==='add'||kind==='remove'?0:before.replace_old||0;
    changes.push({sku:code,source:'admin',active,note,targets:manual,replace_old:replacement});
-   if(['replace','add_targets'].includes(action))for(const target of targets){
+   if(['replace','add_targets'].includes(kind))for(const target of targets){
     const targetBefore=beforeRows.get(target)||absent(target);
     if(targetBefore.missing)fail(400,'替代型號查無來源：'+target+'；請先確認料號');
-    changes.push({sku:target,source:'replacement',active:1,note:targetBefore.note||'',targets:targetBefore.targets||'[]',replace_old:0});
+    // Several originals may share one new model; write its rule row once.
+    if(!addedTargets.has(target)){addedTargets.add(target);changes.push({sku:target,source:'replacement',active:1,note:targetBefore.note||'',targets:targetBefore.targets||'[]',replace_old:0});}
     audits.push({id:crypto.randomUUID(),action:'catalog_add_target',target:JSON.stringify({sku:target,from:code,before:targetBefore.active,after:1})});
    }
-   audits.push({id:crypto.randomUUID(),action:'catalog_'+action,target:JSON.stringify({sku:code,before:{active:before.active,note:before.note,targets:before.targets},after:{active,note,targets:manual,replace_old:replacement}})});
+   audits.push({id:crypto.randomUUID(),action:'catalog_'+kind,target:JSON.stringify({sku:code,before:{active:before.active,note:before.note,targets:before.targets},after:{active,note,targets:manual,replace_old:replacement}})});
   }
   const encoded=JSON.stringify(changes);
   // Fixed four-statement atomic batch, even for 100 SKUs; avoid per-row remote queries.

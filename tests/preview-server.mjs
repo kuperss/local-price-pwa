@@ -51,5 +51,5 @@ const server=createServer(async(req,res)=>{
   res.writeHead(response.status,Object.fromEntries(response.headers));res.end(Buffer.from(await response.arrayBuffer()));
  }catch(error){console.error(error.message);res.writeHead(500);res.end('Synthetic preview error');}
 });
-server.listen(0,'127.0.0.1',()=>{issuer=`http://127.0.0.1:${server.address().port}`;console.log('SYNTHETIC_PREVIEW '+issuer);});
+server.listen(Number(process.env.PORT)||0,'127.0.0.1',()=>{issuer=`http://127.0.0.1:${server.address().port}`;console.log('SYNTHETIC_PREVIEW '+issuer);});
 process.on('SIGINT',()=>server.close(()=>{sql.close();process.exit(0);}));
