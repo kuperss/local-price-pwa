@@ -6,11 +6,13 @@ import json
 import math
 import re
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from cloud import ROOT, Cloud, deployment
+from cloud import ROOT, Cloud, deployment, measured_phase
 
 SCHEMA=(ROOT/'worker/catalog-schema.sql').read_text(encoding='utf-8')
+FIELDS=['sku','name','sale','discontinued','shipping','a2','available','incoming','eta','transfer','changes','issue']
 def canonical(value):
     return unicodedata.normalize('NFKC',str(value or '')).strip().upper()
 
@@ -36,6 +38,18 @@ def setup(cloud,db):
 def setting(cloud,db,key,default=None):
     rows=cloud.query(db,'SELECT value FROM settings WHERE key=?',[key])
     return rows[0]['value'] if rows else default
+
+def switch_metadata(cloud,db,updates,current,previous_input):
+    # Atomic pointer/freshness updates, including same-snapshot reuse. The input guard
+    # prevents an older uploader overwriting freshness after another reused the snapshot.
+    switched=cloud.query(db,"""INSERT INTO settings(key,value)
+      SELECT json_extract(value,'$.key'),json_extract(value,'$.value') FROM json_each(?)
+      WHERE COALESCE((SELECT value FROM settings WHERE key='product_snapshot'),'')=?
+      AND COALESCE((SELECT value FROM settings WHERE key='product_metadata_input'),'')=?
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value RETURNING key""",
+      [json.dumps([{'key':key,'value':value} for key,value in updates.items()]),current or '',previous_input or ''])
+    if len(switched)!=len(updates):
+        raise ValueError('Metadata changed during upload; completed snapshot retained. Retry next sync.')
 
 def metadata(payload,previous=None):
     previous=previous or {};rows={}
@@ -66,35 +80,57 @@ def metadata(payload,previous=None):
             if len(seen)>100:r['issue']='售轉鏈過長';break
     return rows
 
+@measured_phase('metadata_sync')
 def sync_metadata(cloud,db,payload):
     setup(cloud,db)
     digest=hashlib.sha256(json.dumps(payload['master'],ensure_ascii=False,sort_keys=True).encode()).hexdigest()[:16]
-    snapshot=payload['fetched_at']+'-'+digest
+    input_version=payload['fetched_at']+'-'+digest
     current=setting(cloud,db,'product_snapshot')
-    if current==snapshot:return snapshot
+    previous_input=setting(cloud,db,'product_metadata_input')
+    if current==input_version or (current and previous_input==input_version):return current
+    retired=setting(cloud,db,'product_previous_snapshot')
     previous={}
     if current:
-        offset=0
+        after=''
         while True:
-            page=cloud.query(db,'SELECT * FROM product_metadata WHERE snapshot=? ORDER BY sku LIMIT 1000 OFFSET ?',[current,offset])
+            page=cloud.query(db,'SELECT '+','.join(FIELDS)+' FROM product_metadata WHERE snapshot=? AND sku>? ORDER BY sku LIMIT 1000',[current,after])
             previous.update({r['sku']:r for r in page})
             if len(page)<1000:break
-            offset+=1000
-    rows=list(metadata(payload,previous).values())
+            after=page[-1]['sku']
+    generated=metadata(payload,previous)
+    rows=list(generated.values())
     if not rows:raise ValueError('Empty metadata snapshot; previous retained')
-    fields=['sku','name','sale','discontinued','shipping','a2','available','incoming','eta','transfer','changes','issue']
+    # Preserve the immutable snapshot when every whitelisted field is unchanged.
+    # Compare calculated changes/issue too: yesterday's change flags must clear today.
+    if current and generated==previous:
+        switch_metadata(cloud,db,{'product_fetched_at':payload['fetched_at'],
+                        'product_metadata_input':input_version},current,previous_input)
+        print(f'CATALOG_METADATA_OK reused products={len(rows)} fetched_at={payload["fetched_at"]}')
+        return current
+    fields=FIELDS
+    # Separate concurrent staging even for the same input; computed change flags can
+    # differ when two runs started from different baselines. Only the CAS winner is live.
+    snapshot=input_version+'-'+uuid.uuid4().hex[:12]
     for start in range(0,len(rows),200):
         batch=json.dumps(rows[start:start+200],ensure_ascii=False,separators=(',',':'))
         cloud.query(db,'INSERT OR REPLACE INTO product_metadata(snapshot,'+','.join(fields)+') SELECT ?,'+
                     ','.join("json_extract(value,'$."+f+"')" for f in fields)+' FROM json_each(?)',[snapshot,batch])
         if (start+200)%5000==0:print(f'CATALOG_METADATA_STAGED {start+200}/{len(rows)}',flush=True)
-    cloud.query(db,"INSERT INTO settings VALUES('product_snapshot',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[snapshot])
-    cloud.query(db,"INSERT INTO settings VALUES('product_fetched_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[payload['fetched_at']])
-    # Keep previous + current snapshots for inspection; interrupted staging rows are recoverable.
-    cloud.query(db,'DELETE FROM product_metadata WHERE snapshot NOT IN (?,?)',[snapshot,current or snapshot])
+    # One atomic statement: readers never see a new snapshot with an old timestamp.
+    # CAS also stops a slower publisher overwriting a newer completed snapshot.
+    switch_metadata(cloud,db,{'product_snapshot':snapshot,
+                    'product_fetched_at':payload['fetched_at'],
+                    'product_previous_snapshot':current or snapshot,
+                    'product_metadata_input':input_version},current,previous_input)
+    # Indexed delete of one known retired snapshot, never scan/delete other publishers' staging.
+    # Pre-upgrade orphan snapshots are deliberately left for explicit maintenance.
+    if retired and retired not in (snapshot,current):
+        cloud.query(db,"""DELETE FROM product_metadata WHERE snapshot=? AND snapshot NOT IN
+          (SELECT value FROM settings WHERE key IN ('product_snapshot','product_previous_snapshot'))""",[retired])
     print(f'CATALOG_METADATA_OK products={len(rows)} fetched_at={payload["fetched_at"]}')
     return snapshot
 
+@measured_phase('catalog_plan')
 def plan(cloud,db,payload):
     revision=setting(cloud,db,'catalog_revision','0')
     records=cloud.query(db,"""SELECT c.sku,COALESCE(r.active,1) active,COALESCE(r.targets,'[]') targets,
@@ -132,6 +168,16 @@ def main():
     ap.add_argument('--cache',type=Path,default=ROOT.parent.parent/'價格查詢工具/價格查詢/SEVICache.json.gz')
     args=ap.parse_args()
     with gzip.open(args.cache,'rt',encoding='utf-8') as f:payload=json.load(f)
-    sync_metadata(Cloud(),deployment()['database_id'],payload)
+    # Import only for the command-line entry point (publish_data imports this module).
+    from publish_data import usage_report
+    cloud=Cloud();status='failed';error_type=None
+    try:
+        sync_metadata(cloud,deployment()['database_id'],payload)
+        status='completed'
+    except Exception as exc:
+        error_type=type(exc).__name__
+        raise
+    finally:
+        usage_report(cloud,ROOT/'data-private/d1-usage-metadata.json',status,error_type)
 
 if __name__=='__main__':main()

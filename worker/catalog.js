@@ -1,5 +1,7 @@
 // Admin-only metadata. Deliberately contains no price or protected fields.
 import {attentionReasons} from './catalog-attention.js';
+import {ReadCache} from './read-cache.js';
+import {databaseIdentity,recordCacheHit} from './db-usage.js';
 const response=value=>Response.json(value,{headers:{'Cache-Control':'no-store'}});
 const fail=(status,message)=>{throw Object.assign(new Error(message),{status});};
 const normalize=value=>String(value??'').normalize('NFKC').trim().toUpperCase();
@@ -34,9 +36,28 @@ const product=async(db,sku)=>(await productMap(db,[sku])).get(sku);
 // Drive joins from the requested keys, never materialize the full source for a SKU lookup.
 const productMap=async(db,list)=>list.length?new Map((await all(db,lookupCte+'SELECT * FROM products',[JSON.stringify([...new Set(list)])])).map(r=>[r.sku,r])):new Map();
 const absent=sku=>({sku,missing:1,active:0,tracked:0,live:0,state:'outside',targets:'[]'});
-export async function catalogApi(request,db,url,data,actor){
+const caches=new WeakMap();
+const generation=s=>JSON.stringify([s.catalog_revision||'0',s.product_snapshot||'',s.product_fetched_at||'',s.current_bundle||'']);
+function cachedReader(db,version){
+ const identity=databaseIdentity(db);let bucket=caches.get(identity);
+ if(!bucket||bucket.version!==version){bucket={version,cache:new ReadCache()};caches.set(identity,bucket);}
+ const prepare=(sql,params=[])=>({
+  bind(...values){return prepare(sql,values);},
+  async all(){return bucket.cache.get(JSON.stringify([sql,params]),()=>db.prepare(sql).bind(...params).all(),()=>recordCacheHit(db));},
+  async first(){return (await this.all()).results?.[0]||null;}
+ });
+ return {prepare};
+}
+export async function catalogApi(request,rawDb,url,data,actor){
  const path=url.pathname.slice('/admin/api/products'.length);
- const s=await settings(db);
+ // Always read current version pointers AFTER Access authorization. Never serve on DB failure.
+ const s=await settings(rawDb),version=generation(s);
+ const cacheable=request.method==='GET'||(request.method==='POST'&&path==='/preview');
+ const db=cacheable?cachedReader(rawDb,version):rawDb;
+ const respond=async value=>{
+  if(generation(await settings(rawDb))!==version)fail(409,'資料或清單剛更新，請重新整理後再操作');
+  return response(value);
+ };
  if(request.method==='GET'&&!path){
   const p=url.searchParams,params=[],where=[];
   const scope=p.get('scope')||'active';
@@ -61,7 +82,7 @@ export async function catalogApi(request,db,url,data,actor){
   const metrics=await db.prepare(trackedCte+'SELECT '+Object.entries(filters).map(([key,expr])=>`SUM(CASE WHEN (${expr}) THEN 1 ELSE 0 END) AS "${key}"`).join(',')+' FROM products').first();
   const bundle=await db.prepare('SELECT fetched_at,published_at,product_count FROM bundles WHERE version=?').bind(s.current_bundle||'').first();
   const publication=await db.prepare('SELECT report FROM catalog_publications WHERE version=?').bind(s.current_bundle||'').first();
-  return response({rows,total,metrics,revision:s.catalog_revision||'0',fetchedAt:s.product_fetched_at,snapshot:s.product_snapshot,bundle,report:publication?JSON.parse(publication.report):{}});
+  return respond({rows,total,metrics,revision:s.catalog_revision||'0',fetchedAt:s.product_fetched_at,snapshot:s.product_snapshot,bundle,report:publication?JSON.parse(publication.report):{}});
  }
  if(request.method==='GET'&&path==='/detail'){
   const code=normalize(url.searchParams.get('sku'));if(!valid([code]))fail(400,'型號格式錯誤');
@@ -76,12 +97,12 @@ export async function catalogApi(request,db,url,data,actor){
    }
   }
   const history=await all(db,"SELECT actor,action,target,created_at FROM admin_audit WHERE action LIKE 'catalog_%' AND json_valid(target) AND json_extract(target,'$.sku')=? ORDER BY created_at DESC LIMIT 50",[code]);
-  return response({root,nodes,edges,truncated:queue.length>0||edges.some(e=>!seen.has(e.to)),history,revision:s.catalog_revision||'0'});
+  return respond({root,nodes,edges,truncated:queue.length>0||edges.some(e=>!seen.has(e.to)),history,revision:s.catalog_revision||'0'});
  }
  if(request.method==='POST'&&path==='/preview'){
   const list=codes(data.codes);if(!valid(list))fail(400,'每批請輸入 1～100 個有效型號（一行一個）');
   const found=await productMap(db,list),rows=list.map(code=>found.get(code)||absent(code));
-  return response({rows,revision:s.catalog_revision||'0'});
+  return respond({rows,revision:s.catalog_revision||'0'});
  }
  if(request.method==='POST'&&path==='/apply'){
   const list=codes(data.codes),action=data.action;

@@ -1,6 +1,7 @@
 import {createRemoteJWKSet,jwtVerify} from 'jose';
 import {catalogApi} from './catalog.js';
 import {serviceError} from './service-error.js';
+import {measureDatabase} from './db-usage.js';
 import {COST_FORMAT,validCostConfig,wrapCostKey} from '../cost-crypto.js';
 const enc=new TextEncoder();
 const json=(obj,status=200)=>Response.json(obj,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
@@ -38,7 +39,12 @@ async function authenticate(request,env,raw){
  if(!ok) fail(401,'裝置簽章驗證失敗');
  const result=await env.DB.prepare('INSERT OR IGNORE INTO nonces(device_id,nonce,expires) VALUES(?,?,?)').bind(id,nonce,Date.now()+300000).run();
  if(result.meta.changes!==1) fail(409,'請求已使用，請重試');
- await env.DB.batch([env.DB.prepare('DELETE FROM nonces WHERE expires<?').bind(Date.now()),env.DB.prepare('UPDATE devices SET last_seen=? WHERE id=?').bind(now(),id)]);
+ const seen=now(), minute=seen.slice(0,16)+':00.000Z';
+ const maintenance=[env.DB.prepare('DELETE FROM nonces WHERE expires<?').bind(Date.now())];
+ // Authentication always reads the current device and inserts a unique nonce.
+ // Presence only needs minute precision; the predicate also protects concurrent requests.
+ if(!device.last_seen||device.last_seen<minute)maintenance.push(env.DB.prepare('UPDATE devices SET last_seen=? WHERE id=? AND (last_seen IS NULL OR last_seen<?)').bind(seen,id,minute));
+ await env.DB.batch(maintenance);
  return device;
 }
 async function register(request,env,data){
@@ -62,7 +68,14 @@ async function api(request,env,url){
  if(path==='/api/register'&&request.method==='POST') return register(request,env,data);
  if(path.startsWith('/admin/api/')) return adminApi(request,env,url,data,await admin(request,env));
  const d=await authenticate(request,env,raw);
- if(path==='/api/status') return json({id:d.id,name:d.name,status:d.status,approvedAt:d.approved_at});
+ const status={id:d.id,name:d.name,status:d.status,approvedAt:d.approved_at};
+ if(path==='/api/status') return json(status);
+ // One freshly authenticated request replaces status + bundle. POST binds the
+ // client's versions to its signature; old clients keep their original endpoints.
+ if(path==='/api/sync'&&request.method==='POST'){
+  if(d.status!=='approved')return json(status);
+  return json({...status,bundle:await bundlePayload(env,text(data.version,160),text(data.costRevision,100))});
+ }
  // Accept queued audits from revoked devices, but never send them products or keys.
  if(path==='/api/events'&&request.method==='POST'){
   if(!['approved','revoked'].includes(d.status)) fail(403,'尚未核准');
@@ -76,7 +89,16 @@ async function api(request,env,url){
   return json({ok:true,status:d.status});
  }
  if(d.status!=='approved') return json({status:d.status,error:'此裝置尚未開通或已停權'},403);
- if(path==='/api/bundle'){
+ if(path==='/api/bundle')return json(await bundlePayload(env,url.searchParams.get('version'),url.searchParams.get('costRevision')));
+ if(path==='/api/requests'&&request.method==='POST'){
+  const code=sku(data.sku); if(!code||!/^[\x21-\x7e]+$/.test(code)) fail(400,'請填寫有效的產品型號');
+  await env.DB.prepare('INSERT OR IGNORE INTO requests(id,device_id,sku,note,created_at) VALUES(?,?,?,?,?)').bind(crypto.randomUUID(),d.id,code,text(data.note,300),now()).run();
+  return json({ok:true});
+ }
+ if(path==='/api/requests') return json((await env.DB.prepare('SELECT sku,note,status,created_at FROM requests WHERE device_id=? ORDER BY created_at DESC LIMIT 100').bind(d.id).all()).results);
+ fail(404,'找不到功能');
+}
+async function bundlePayload(env,version,knownCostRevision){
   const b=await env.DB.prepare("SELECT * FROM bundles WHERE version=(SELECT value FROM settings WHERE key='current_bundle')").first();
   if(!b) fail(503,'產品資料尚未發布');
   // Never serve legacy bundles: those included costs in the ordinary price payload.
@@ -85,9 +107,9 @@ async function api(request,env,url){
   const configRow=await env.DB.prepare("SELECT value FROM settings WHERE key='cost_password_v1'").first();
   const config=configRow?JSON.parse(configRow.value):null;
   const costRevision=config?.revision||'none';
-  const unchanged=url.searchParams.get('version')===b.version;
+  const unchanged=version===b.version;
   let cost;
-  if(!unchanged||url.searchParams.get('costRevision')!==costRevision){
+  if(!unchanged||knownCostRevision!==costRevision){
    cost={configured:false,revision:costRevision};
    if(config){
     const chunks=await env.DB.prepare('SELECT content FROM cost_chunks WHERE version=? ORDER BY seq').bind(b.version).all();
@@ -97,18 +119,10 @@ async function api(request,env,url){
    }
   }
   const security={securityFormat:COST_FORMAT,costRevision,...(cost?{cost}:{})};
-  if(unchanged) return json({unchanged:true,version:b.version,...security});
+  if(unchanged) return {unchanged:true,version:b.version,...security};
   const chunks=await env.DB.prepare('SELECT content FROM bundle_chunks WHERE version=? ORDER BY seq').bind(b.version).all();
   if(chunks.results.length!==b.chunks) fail(503,'資料包不完整');
-  return json({version:b.version,fetchedAt:b.fetched_at,count:b.product_count,key:b.key_b64,iv:b.iv_b64,hash:b.content_hash,cipher:chunks.results.map(x=>x.content).join(''),...security});
- }
- if(path==='/api/requests'&&request.method==='POST'){
-  const code=sku(data.sku); if(!code||!/^[\x21-\x7e]+$/.test(code)) fail(400,'請填寫有效的產品型號');
-  await env.DB.prepare('INSERT OR IGNORE INTO requests(id,device_id,sku,note,created_at) VALUES(?,?,?,?,?)').bind(crypto.randomUUID(),d.id,code,text(data.note,300),now()).run();
-  return json({ok:true});
- }
- if(path==='/api/requests') return json((await env.DB.prepare('SELECT sku,note,status,created_at FROM requests WHERE device_id=? ORDER BY created_at DESC LIMIT 100').bind(d.id).all()).results);
- fail(404,'找不到功能');
+  return {version:b.version,fetchedAt:b.fetched_at,count:b.product_count,key:b.key_b64,iv:b.iv_b64,hash:b.content_hash,cipher:chunks.results.map(x=>x.content).join(''),...security};
 }
 async function adminApi(request,env,url,data,actor){
  if(url.pathname==='/admin/api/products'||url.pathname.startsWith('/admin/api/products/'))return catalogApi(request,env.DB,url,data,actor);
@@ -154,7 +168,13 @@ async function adminApi(request,env,url,data,actor){
 export default {async fetch(request,env){
  try{
   const url=new URL(request.url);
-  if(url.pathname.startsWith('/api/')||url.pathname.startsWith('/admin/api/')) return await api(request,env,url);
+  if(url.pathname.startsWith('/api/')||url.pathname.startsWith('/admin/api/')){
+   const measured=measureDatabase(env.DB);
+   // Fixed categories only: never log query text, search terms or device identities.
+   const route=['/api/register','/api/status','/api/sync','/api/bundle','/api/events','/api/requests','/admin/api/products','/admin/api/products/detail','/admin/api/products/preview','/admin/api/products/apply','/admin/api/events','/admin/api/devices','/admin/api/requests'].includes(url.pathname)?url.pathname:url.pathname.startsWith('/admin/api/')?'/admin/api/other':'/api/other';
+   try{return await api(request,{...env,DB:measured.db},url);}
+   finally{console.info({kind:'D1_USAGE',route,...measured.summary()});}
+  }
   if(url.pathname==='/admin'||url.pathname.startsWith('/admin/')){
    await admin(request,env);
    if(url.pathname==='/admin') return Response.redirect(url.origin+'/admin/',302);

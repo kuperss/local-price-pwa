@@ -98,5 +98,86 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(plan['aliases'][0]['_replacements'],['NEW'])
         self.assertEqual(p['master']['OLD']['TA_IMA107'],'UNKNOWN-ERP-TARGET')
 
+    def test_metadata_keyset_atomic_switch_and_targeted_cleanup(self):
+        p={'fetched_at':'2026-09-17T10:00:00','master':{
+            f'K{i:05}':{'IMA01':f'K{i:05}','出貨可用量':'1','A2外倉':'0'} for i in range(2305)}}
+        snapshots=[];queries=[];original=self.cloud.query
+        def recording(db,sql,params=None):
+            queries.append((sql,params));return original(db,sql,params)
+        with patch.object(self.cloud,'query',recording):
+            for day in (17,18,19):
+                p['fetched_at']=f'2026-09-{day}T10:00:00'
+                p['master']['K00000']['IMA02']=str(day)
+                snapshots.append(catalog.sync_metadata(self.cloud,'',p))
+                self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),p['fetched_at'])
+            queries.clear()
+            self.assertEqual(catalog.sync_metadata(self.cloud,'',p),snapshots[-1])
+            self.assertFalse(any('INTO product_metadata' in sql or 'DELETE FROM product_metadata' in sql for sql,_ in queries))
+        kept=self.cloud.query('', 'SELECT DISTINCT snapshot FROM product_metadata ORDER BY snapshot')
+        self.assertEqual([r['snapshot'] for r in kept],sorted(snapshots[-2:]))
+        # Capture one further sync to prove cursor traversal and primary-key deletion.
+        queries.clear();p['fetched_at']='2026-09-20T10:00:00';p['master']['K00000']['IMA02']='20'
+        with patch.object(self.cloud,'query',recording):catalog.sync_metadata(self.cloud,'',p)
+        pages=[(sql,params) for sql,params in queries if 'AND sku>?' in sql]
+        self.assertEqual([params[1] for _,params in pages],['','K00999','K01999'])
+        self.assertTrue(all('OFFSET' not in sql for sql,_ in queries))
+        self.assertTrue(all('WHERE snapshot=?' in sql for sql,_ in queries if 'DELETE FROM product_metadata' in sql))
+
+    def test_metadata_interruption_and_competing_pointer_keep_complete_state(self):
+        p=payload();first=catalog.sync_metadata(self.cloud,'',p)
+        old_time=catalog.setting(self.cloud,'','product_fetched_at')
+        p['fetched_at']='2026-09-18T10:00:00';p['master']['NEW']['IMA02']='changed';original=self.cloud.query
+        def failing(db,sql,params=None):
+            if 'INTO product_metadata' in sql:raise RuntimeError('interrupted staging')
+            return original(db,sql,params)
+        with patch.object(self.cloud,'query',failing),self.assertRaises(RuntimeError):catalog.sync_metadata(self.cloud,'',p)
+        self.assertEqual(catalog.setting(self.cloud,'','product_snapshot'),first)
+        self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),old_time)
+        def competing(db,sql,params=None):
+            result=original(db,sql,params)
+            if 'INTO product_metadata' in sql:
+                original(db,"UPDATE settings SET value='other-complete-snapshot' WHERE key='product_snapshot'")
+                original(db,"UPDATE settings SET value='other-time' WHERE key='product_fetched_at'")
+            return result
+        with patch.object(self.cloud,'query',competing),self.assertRaisesRegex(ValueError,'Metadata changed'):
+            catalog.sync_metadata(self.cloud,'',p)
+        self.assertEqual(catalog.setting(self.cloud,'','product_snapshot'),'other-complete-snapshot')
+        self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),'other-time')
+        self.assertEqual(len(original('', 'SELECT sku FROM product_metadata WHERE snapshot=?',[first])),3)
+
+    def test_identical_metadata_reuses_snapshot_but_not_expired_change_flags(self):
+        p=payload();first=catalog.sync_metadata(self.cloud,'',p);original=self.cloud.query;queries=[]
+        def recording(db,sql,params=None):
+            queries.append(sql);return original(db,sql,params)
+        p['fetched_at']='2026-09-18T10:00:00';p['master']['NEW']['A']='999'
+        with patch.object(self.cloud,'query',recording):
+            self.assertEqual(catalog.sync_metadata(self.cloud,'',p),first)
+            self.assertFalse(any('INTO product_metadata' in sql or 'DELETE FROM product_metadata' in sql for sql in queries))
+            self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),p['fetched_at'])
+            queries.clear()
+            self.assertEqual(catalog.sync_metadata(self.cloud,'',p),first)
+            self.assertFalse(any('FROM product_metadata' in sql for sql in queries))
+        p['fetched_at']='2026-09-19T10:00:00';p['master']['NEW']['出貨可用量']='2'
+        second=catalog.sync_metadata(self.cloud,'',p)
+        self.assertNotEqual(second,first)
+        self.assertEqual(original('',"SELECT changes FROM product_metadata WHERE snapshot=? AND sku='NEW'",[second])[0]['changes'],'新歸零')
+        p['fetched_at']='2026-09-20T10:00:00'
+        third=catalog.sync_metadata(self.cloud,'',p)
+        self.assertNotEqual(third,second)
+        self.assertEqual(original('',"SELECT changes FROM product_metadata WHERE snapshot=? AND sku='NEW'",[third])[0]['changes'],'')
+
+    def test_same_snapshot_reuse_cannot_overwrite_concurrent_freshness(self):
+        p=payload();first=catalog.sync_metadata(self.cloud,'',p);original=self.cloud.query
+        p['fetched_at']='2026-09-18T10:00:00'
+        def competing(db,sql,params=None):
+            if 'INSERT INTO settings(key,value)' in sql:
+                original(db,"UPDATE settings SET value='newer-input' WHERE key='product_metadata_input'")
+                original(db,"UPDATE settings SET value='newer-time' WHERE key='product_fetched_at'")
+            return original(db,sql,params)
+        with patch.object(self.cloud,'query',competing),self.assertRaisesRegex(ValueError,'Metadata changed'):
+            catalog.sync_metadata(self.cloud,'',p)
+        self.assertEqual(catalog.setting(self.cloud,'','product_snapshot'),first)
+        self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),'newer-time')
+
 
 if __name__=='__main__':unittest.main()

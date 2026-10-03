@@ -151,7 +151,7 @@ async function init() {
   registerServiceWorker();
   detectInstallPrompt();
   managed = await startManaged({
-    get: getValue, set: setValue, del: deleteValue,
+    get: getValue, set: setValue, del: deleteValue, update: updateValue,
     activate: async (rows, meta) => {
       const bundle = buildBundleFromJson(`產品料檔 ${meta.fetchedAt.slice(0,10)}`, rows, meta.version);
       await activateBundleFromJson(bundle);
@@ -1388,6 +1388,25 @@ async function setValue(key, value) {
     transaction.oncomplete = () => resolve();
     transaction.onabort = () => reject(transaction.error || new Error('儲存未完成'));
     request.onerror = () => reject(request.error);
+  });
+}
+
+// One transaction serializes queue mutations across all tabs, not just this page.
+// The updater is synchronous: never await network or unrelated work inside it.
+async function updateValue(key, updater) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.get(key);
+    let value;
+    request.onsuccess = () => {
+      try { value = updater(request.result); store.put(value, key); }
+      catch (error) { transaction.abort(); reject(error); }
+    };
+    transaction.oncomplete = () => { db.close(); resolve(value); };
+    transaction.onabort = () => { db.close(); reject(transaction.error || new Error('儲存未完成')); };
+    transaction.onerror = () => { /* onabort reports the failed transaction. */ };
   });
 }
 

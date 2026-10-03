@@ -1,4 +1,66 @@
-# 售價速查新版交接 — 2026-09-17
+# 售價速查新版交接 — 2026-09-21
+
+## v56 用量優化（2026-09-21，本機完成，未 Commit／Push／部署）
+
+### 目的與邊界
+
+- 減少相同查詢反覆掃描、每日同步重複讀寫、裝置重複驗證請求；不犧牲 Access、簽章、停權與發布一致性。
+- 使用既有 Worker／D1，無新增雲端服務、schema 遷移或付費升級。未改正式清單，也未執行 BI 同步或正式料檔發布。
+- 本機 shell 升 v56；最後記錄的線上版本仍見下方 9/17 章節。不可把本機測試通過當作已上線。
+- 每日排程直接呼叫這個 checkout 的 scripts/publish_data.py，所以 Python 修改會於下次排程執行，
+  不以 commit／Worker 部署為生效開關；新腳本與舊 Worker 可相容。
+
+### 實作與安全
+
+1. worker/read-cache.js：最佳努力的單 isolate LRU，128 項、總 8 MiB、單項 512 KiB、TTL 5 分鐘。
+   合併同時查詢、回傳獨立複本；失敗不快取；淘汰的 pending 結果不可重新插回。冷啟動／跨 isolate 是正常 miss，
+   Cloudflare 不保證 binding 物件跨請求身分，因此不能承諾固定命中率。
+2. worker/catalog.js：只快取管理 metadata 讀取／preview，不快取 apply 校驗或任何權限資訊。
+   每次先 Access 驗證，再讀取 settings；快取 key 包含 catalog_revision、product_snapshot、product_fetched_at、current_bundle。
+   回傳前再次核對版本，不同回 409 要求重新整理；D1 失敗不退回舊清單。命中相同頁面的本機測試只需 2 次 settings SQL。
+   HTTP 仍 no-store，沒有把清單交給公開 CDN／service worker 快取。計數、替代圖、明細有共用查詢快取。
+3. scripts/catalog_sync.py：舊快照改為 snapshot + sku > 上一頁末值的主鍵接續分頁（每頁 1,000）。
+   product_metadata_input 指紋相同則不讀寫完整索引；新時間但所有白名單欄位相同則只更新來源時間／輸入指紋，重用快照。
+   比較包含 changes／issue，前一次的變動標籤應清除時仍會建新快照。唯一 staging ID + 雙指標 CAS 防並行覆蓋，
+   快照、來源時間與相關指標以單一 SQL 原子切換。只以索引刪除已知退役快照且保護現行／上一版；
+   升級前孤立快照或失敗 staging 不做全表掃描清除，若累積需另行明確維護。
+4. POST /api/sync：一個簽章請求回裝置狀態與 bundle 更新結果，舊 /api/status、/api/bundle 留存。
+   每次都即時讀裝置、驗簽、使用 nonce；last_seen 同分鐘省略重寫，SQL 條件另防並行重寫。
+   前景 60 秒檢查照常，停權回連清資料、改密碼／重新核准取消 @ 權限。無更新時不重複解密、重建搜尋索引。
+   本機無更新 fixture 的 SQL 次數由舊雙請求 9 次降至合併 6 次；這不是正式 rows_read 節省比例。
+
+### 實際用量怎麼看
+
+- worker/db-usage.js 依 D1 回傳 meta 累計 statements、failedStatements、rowsRead、rowsWritten、unmeasured、cacheHits。
+  Worker 每個 API request 最後只記錄固定 route 分類與數字（kind: D1_USAGE），不記 SQL／參數、搜尋字串、身分或金鑰。
+  wrangler.jsonc 開啟結構化 console logs、關閉 invocation logs 並遮蔽 URL query；部署後才生效。
+  在 Cloudflare 此 Worker 的 Logs 搜尋 D1_USAGE，觀察同 route 的冷／熱查詢；log 保留／額度依帳號方案，並非無限監控。
+- Python Cloud.query 按 metadata_sync、catalog_plan、bundle_publish 等階段累計 provider meta；
+  發布／索引工具結束（含失敗）寫入忽略版控的 data-private/d1-usage-publish.json 或 d1-usage-metadata.json。
+  報告只保留該次執行的計數、階段、狀態、錯誤類別、完成時間；不含 SQL／產品資料／憑證。最新一次會取代前次檔案。
+- unmeasured／missing_meta／failed_requests 非零表示不完整，不能把未測得列數視為 0。
+  這些是本工具 request／執行紀錄，不等於帳號其他 DB 合計，也不能把七日 insights 說成今日用量。
+- 全量資料真的有變時仍建完整快照；寫入與索引、退役清理仍可能超過免費每日寫入限制。
+  先用下次真實同步報告判斷；本次不保證免費額度永遠足夠，也不自動改付費或遷往 R2。
+- 官方參考：[D1 計價與列數](https://developers.cloudflare.com/d1/platform/pricing/)、
+  [D1 回傳 meta](https://developers.cloudflare.com/d1/worker-api/return-object/)、
+  [Worker Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/)。
+
+### 本機驗收與待驗證
+
+- Node 31 項、Python 18 項通過；公開建置與 wrangler deploy --dry-run 通過（沒有真正部署）。
+  測試涵蓋快取界限／同時請求／跨 DB 隔離／revision 與快照失效／暖快取不繞過 Access，
+  接續分頁／相同輸入跳過／重用快照／並行 CAS／中斷保留舊版，以及裝置撤權、@ 輪替、503 與離線退路。
+- npm test 內含 build，不能與 npm run build 同時跑（兩者會競爭 dist）；一次並行測試因此失敗，改循序後 31 項全通過。
+- BI selftest 回傳 0；有同步時差提醒：四張關鍵表介於 2026-09-17 17:02 與 2026-09-21 08:05。
+  本次未同步／修改 BI 資料，不把部分表較新解讀成整套資料已更新。
+- Playwright 本機記憶體 DB 假資料實測申請 → 核准 → 載入 TEST-001 → 重新整理仍可查詢 → 停權回連鎖回，
+  畫面提示本機料檔已清除；網路請求使用 POST /api/sync，無舊 status／bundle 雙請求。
+  儲存層 cache／grant／@ 權限清除由 Node 控制器測試核對，沒有把畫面提示單獨當成儲存刪除證據。
+  CLI run-code 兩次遇到 Session closed，改用既有 CLI click／reload／snapshot 與本機測試 API 完成流程，
+  不繞過正式 Access。假資料／瀏覽器快照留於忽略目錄，不進 Git；正式資料沒有寫入。
+- 正式 D1 讀寫減量、正式 Access 與手機 Safari／Android 仍待上線後驗收。
+
 
 ## 檢查原因與 D1 讀取額度（2026-09-17）
 

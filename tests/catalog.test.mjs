@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync} from 'node:fs';
 import {catalogApi} from '../worker/catalog.js';
+import {measureDatabase} from '../worker/db-usage.js';
 
 function fixture(){
  const sql=new DatabaseSync(':memory:');
@@ -36,12 +37,62 @@ test('attention reasons explain membership; zero A2 and absent incoming alone ar
   await call('/apply',{action:'add',codes:['NEW'],revision:'0'});
   rows=(await call('?scope=tracked&filters=attention')).rows;
   assert.ok(!rows.some(r=>r.sku==='OLD'));
-  sql.exec("UPDATE product_metadata SET available=0 WHERE sku='OLD'; UPDATE product_metadata SET issue='循環' WHERE sku='CLEAR'; DELETE FROM product_metadata WHERE sku='UNK';");
+  sql.exec("UPDATE product_metadata SET available=0 WHERE sku='OLD'; UPDATE product_metadata SET issue='循環' WHERE sku='CLEAR'; DELETE FROM product_metadata WHERE sku='UNK'; INSERT INTO settings VALUES('product_fetched_at','new-fixture');");
   const allRows=(await call('?scope=tracked')).rows;
   const attention=(await call('?scope=tracked&filters=attention')).rows;
   assert.deepEqual(attention.map(r=>r.sku),allRows.filter(r=>r.attentionReasons.length).map(r=>r.sku));
   assert.deepEqual(attention.find(r=>r.sku==='OLD').attentionReasons,['原型號實際可用量為 0，已有替代型號']);
   assert.deepEqual(attention.find(r=>r.sku==='UNK').attentionReasons,['來源查無產品資料']);
+ }finally{sql.close();}
+});
+
+test('warm catalog uses only version reads; filters reuse metrics and mutations invalidate cached data',async()=>{
+ const {sql,call,DB}=fixture();try{
+  const queries=[],prepare=DB.prepare.bind(DB);DB.prepare=q=>{queries.push(q);return prepare(q);};
+  const cold=await call('?scope=tracked');const coldCount=queries.length;
+  queries.length=0;
+  assert.deepEqual(await call('?scope=tracked'),cold);
+  assert.equal(queries.length,2);assert.ok(queries.every(q=>q.startsWith('SELECT key,value FROM settings')));
+  assert.ok(coldCount>queries.length);
+  queries.length=0;await call('?scope=tracked&filters=sale');
+  assert.ok(!queries.some(q=>q.includes('SUM(CASE')),'metrics must be shared across filters');
+  const changed=await call('/apply',{action:'remove',codes:['OLD'],revision:'0'});
+  const fresh=await call('?scope=tracked');assert.equal(fresh.revision,changed.revision);
+  assert.equal(fresh.rows.find(r=>r.sku==='OLD').state,'pending_remove');
+  sql.exec("INSERT INTO product_metadata SELECT 's2',sku,name,sale,discontinued,99,a2,99+a2,incoming,eta,transfer,changes,issue FROM product_metadata WHERE snapshot='s'; UPDATE settings SET value='s2' WHERE key='product_snapshot';");
+  assert.equal((await call('?scope=tracked')).rows.find(r=>r.sku==='OLD').available,99);
+  sql.exec("UPDATE settings SET value='v2' WHERE key='current_bundle';");
+  assert.equal((await call('?scope=tracked')).rows.find(r=>r.sku==='OLD').state,'removed');
+ }finally{sql.close();}
+});
+
+test('request-local wrappers share a cache only for the same underlying database',async()=>{
+ const a=fixture(),b=fixture();try{
+  const read=async raw=>{
+   const measured=measureDatabase(raw),url=new URL('https://test/admin/api/products');
+   const result=await catalogApi(new Request(url),measured.db,url,{},'owner@test');
+   return {body:await result.json(),usage:measured.summary()};
+  };
+  const cold=await read(a.DB),warm=await read(a.DB);
+  assert.deepEqual(warm.body,cold.body);assert.equal(warm.usage.statements,2);
+  assert.ok(warm.usage.cacheHits>0);
+  b.sql.exec("UPDATE product_metadata SET name='different database' WHERE sku='OLD'");
+  const separate=await read(b.DB);
+  assert.equal(separate.body.rows.find(r=>r.sku==='OLD').name,'different database');
+  assert.ok(separate.usage.statements>2);
+ }finally{a.sql.close();b.sql.close();}
+});
+
+test('version changes during a read return a conflict; DB failure never falls back to a cached list',async()=>{
+ const {sql,call,DB}=fixture();try{
+  await call();const prepare=DB.prepare.bind(DB);
+  DB.prepare=q=>{if(q.startsWith('SELECT key,value'))throw new Error('offline');return prepare(q);};
+  await assert.rejects(call(),/offline/);
+  let reads=0;DB.prepare=q=>{
+   if(q.startsWith('SELECT key,value')&&++reads===2)sql.exec("UPDATE settings SET value='new-revision' WHERE key='catalog_revision';");
+   return prepare(q);
+  };
+  await assert.rejects(call(),e=>e.status===409);
  }finally{sql.close();}
 });
 

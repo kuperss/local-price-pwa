@@ -8,7 +8,7 @@ const b64=a=>{let s='';for(const n of new Uint8Array(a))s+=String.fromCharCode(n
 const hash=async a=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',a))).map(n=>n.toString(16).padStart(2,'0')).join('');
 export async function startManaged(hooks){
  const {get,set,del,activate,clear}=hooks;
- let identity=await get(K.identity), grant=await get(K.grant), current=await get(K.cache), allowed=false, busy=false, mutation=Promise.resolve(), sessionRecorded=false;
+ let identity=await get(K.identity), grant=await get(K.grant), current=await get(K.cache), allowed=false, busy=false, mutation=Promise.resolve(), sessionRecorded=false, activatedScope=null;
  const costSession=createCostSession({get,set,del,lock:hooks.lockCosts,show:hooks.showCosts,
   context:()=>({id:identity?.id,approval:grant?.approvedAt,revision:current?.costRevision,version:current?.version,envelope:current?.cost,allowed})});
  // Old bundles carried costs with general prices: never reuse them, even offline.
@@ -19,7 +19,7 @@ export async function startManaged(hooks){
  const surfaces=[...document.querySelectorAll('.app-shell,.mobile-dock')];
  surfaces.forEach(el=>el.inert=true);
  const message=gate.querySelector('#device-message'), form=gate.querySelector('form'), check=gate.querySelector('#device-check');
- const lock=(msg)=>{allowed=false;clear();surfaces.forEach(el=>el.inert=true);gate.hidden=false;message.textContent=msg;};
+ const lock=(msg)=>{allowed=false;activatedScope=null;clear();surfaces.forEach(el=>el.inert=true);gate.hidden=false;message.textContent=msg;};
  const requireAuthentication=async msg=>{allowed=false;await costSession.forget();grant=null;await del(K.grant);lock(msg);};
  const display=()=>{gate.querySelector('#device-id').textContent=identity?`裝置 ${identity.id}`:'';form.hidden=!!identity?.registered;};
  const exclusive=fn=>{const work=mutation.then(fn);mutation=work.catch(()=>{});return work;};
@@ -60,10 +60,15 @@ export async function startManaged(hooks){
   if(rows.some(row=>!row||Object.keys(row).some(isCostField)))throw new Error('料檔尚未完成@分離，請聯絡管理員更新');
   return rows;
  }
- async function openCached(){
+ async function openCached(preparedRows){
   if(!current||!grant||grant.id!==identity?.id)return false;
-  const rows=await decrypt(current);await activate(rows,current);allowed=true;
-  await costSession.restore();
+  const scope=JSON.stringify([current.version,grant.id,grant.approvedAt,current.costRevision]);
+  // A successful live permission check still happens every minute. Only skip
+  // repeating local decryption/index construction for an already displayed dataset.
+  if(!allowed||activatedScope!==scope){
+   const rows=preparedRows||await decrypt(current);await activate(rows,current);allowed=true;
+   await costSession.restore();activatedScope=scope;
+  }
   gate.hidden=true;surfaces.forEach(el=>el.inert=false);
   if(!sessionRecorded){sessionRecorded=true;await addEvent('session');}
   return true;
@@ -73,7 +78,7 @@ export async function startManaged(hooks){
   try{
    display();if(!identity?.registered){await requireAuthentication('為確保資訊安全，請填寫使用者名稱驗證。');return;}
    let status;
-   try{status=await request('/api/status');}
+   try{status=await request('/api/sync',{version:current?.version||'',costRevision:current?.costRevision||''});}
    catch(e){
     if(e.deviceStatus==='revoked'){await wipe('revoked');return;}
     if(e.status===401||e.status===403){await requireAuthentication(e.message);return;}
@@ -87,15 +92,16 @@ export async function startManaged(hooks){
    }
    if(grant?.approvedAt!==status.approvedAt)await costSession.forget();
    grant={id:identity.id,name:status.name,approvedAt:status.approvedAt,checkedAt:new Date().toISOString()};await set(K.grant,grant);
-   const bundle=await request(`/api/bundle?version=${encodeURIComponent(current?.version||'')}&costRevision=${encodeURIComponent(current?.costRevision||'')}`);
+   const bundle=status.bundle;
    if(bundle.securityFormat!==COST_FORMAT)throw new Error('伺服器尚未完成安全升級，請聯絡管理員');
    if(current&&bundle.costRevision!==current.costRevision)await costSession.forget();
+   let preparedRows;
    if(!bundle.unchanged){
     if(await hash(bytes(bundle.cipher))!==bundle.hash)throw new Error('下載資料不完整，請重新更新');
     const localKey=await crypto.subtle.importKey('raw',bytes(bundle.key),'AES-GCM',false,['decrypt']);
     const candidate={version:bundle.version,fetchedAt:bundle.fetchedAt,count:bundle.count,iv:bundle.iv,cipher:bundle.cipher,localKey,securityFormat:COST_FORMAT,costRevision:bundle.costRevision,cost:bundle.cost};
     hooks.lockCosts(); // Hide old product costs while replacing the dataset; retain the saved KEK.
-    await decrypt(candidate);await set(K.cache,candidate);current=candidate;
+    preparedRows=await decrypt(candidate);await set(K.cache,candidate);current=candidate;
     hooks.toast('已更新料檔');
    }
    else if(bundle.costRevision!==current.costRevision){
@@ -103,7 +109,7 @@ export async function startManaged(hooks){
     const candidate={...current,costRevision:bundle.costRevision,cost:bundle.cost};
     await set(K.cache,candidate);current=candidate;
    }
-   await openCached();hooks.status(`料檔更新：${current.fetchedAt.replace('T',' ')} · ${current.count.toLocaleString()} 筆`);
+   await openCached(preparedRows);hooks.status(`料檔更新：${current.fetchedAt.replace('T',' ')} · ${current.count.toLocaleString()} 筆`);
    await flushEvents();await flushRequests();
   }catch(e){
    if(e.deviceStatus==='revoked'){await wipe('revoked');}

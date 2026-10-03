@@ -9,7 +9,8 @@ import {createCostPasswordConfig,decryptCostEnvelope,COST_FORMAT} from '../cost-
 
 const sql=new DatabaseSync(':memory:');sql.exec(readFileSync(new URL('../worker/schema.sql',import.meta.url),'utf8'));
 sql.exec(readFileSync(new URL('../worker/catalog-schema.sql',import.meta.url),'utf8'));
-const DB={prepare(query){return {params:[],bind(...params){this.params=params;return this;},async first(){return sql.prepare(query).get(...this.params)||null;},async all(){return {results:sql.prepare(query).all(...this.params)};},async run(){const r=sql.prepare(query).run(...this.params);return {meta:{changes:Number(r.changes)}};}};},async batch(items){sql.exec('BEGIN');try{const result=await Promise.all(items.map(s=>s.run()));sql.exec('COMMIT');return result;}catch(e){sql.exec('ROLLBACK');throw e;}}};
+const executed=[];
+const DB={prepare(query){return {params:[],bind(...params){this.params=params;return this;},async first(){executed.push(query);return sql.prepare(query).get(...this.params)||null;},async all(){executed.push(query);return {results:sql.prepare(query).all(...this.params)};},async run(){executed.push(query);const r=sql.prepare(query).run(...this.params);return {meta:{changes:Number(r.changes)}};}};},async batch(items){sql.exec('BEGIN');try{const result=await Promise.all(items.map(s=>s.run()));sql.exec('COMMIT');return result;}catch(e){sql.exec('ROLLBACK');throw e;}}};
 const pair=await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},false,['sign','verify']);
 const publicKey=await crypto.subtle.exportKey('jwk',pair.publicKey),id=crypto.randomUUID();
 const {publicKey:apub,privateKey:apriv}=await generateKeyPair('RS256');const jwk={...await exportJWK(apub),kid:'test',alg:'RS256'};
@@ -32,14 +33,22 @@ test('device authorization, signed requests, auditing and revocation end to end'
   assert.equal((await admin('products',undefined,'intruder@example.com')).status,403);
   assert.equal((await call('/admin/api/devices',{headers:{'Cf-Access-Jwt-Assertion':'forged'}})).status,401);
   assert.equal((await admin('devices',undefined,'intruder@example.com')).status,403);
+  assert.equal((await admin('products')).status,200);
+  executed.length=0;
+  assert.equal((await call('/admin/api/products')).status,401);
+  assert.equal((await admin('products',undefined,'intruder@example.com')).status,403);
+  assert.equal(executed.length,0,'warm catalog cache never bypasses Access verification');
   assert.equal((await call('/api/register',post({id,name:'測試使用者',publicKey}))).status,201);
   let r=await worker.fetch(await signed('/api/status'),env);assert.equal((await r.json()).status,'pending');
+  const pendingSync=await (await worker.fetch(await signed('/api/sync',{}),env)).json();
+  assert.equal(pendingSync.status,'pending');assert.equal(pendingSync.bundle,undefined);
   assert.equal((await worker.fetch(await signed('/api/bundle'),env)).status,403);
   assert.equal((await admin('devices',{id,status:'approved'})).status,200);
   // A legacy bundle with embedded costs must fail closed, not leak through /api/bundle.
   sql.prepare('INSERT INTO bundles VALUES(?,?,?,?,?,?,?,?)').run('test-version','2026-09-15T09:00:00','2026-09-15T01:00:00Z',1,'old-key','old-iv','old-hash',1);
   sql.prepare('INSERT INTO settings VALUES(?,?)').run('current_bundle','test-version');
   assert.equal((await worker.fetch(await signed('/api/bundle'),env)).status,503);
+  assert.equal((await worker.fetch(await signed('/api/sync',{}),env)).status,503,'combined sync also refuses legacy embedded-cost bundles');
   const costKey=crypto.getRandomValues(new Uint8Array(32)),costIv=crypto.getRandomValues(new Uint8Array(12));
   const costRows=[{'型號':'TEST-SKU','銷售成本':'CONFIDENTIAL_COST_MARKER'}];
   const imported=await crypto.subtle.importKey('raw',costKey,'AES-GCM',false,['encrypt']);
@@ -49,6 +58,8 @@ test('device authorization, signed requests, auditing and revocation end to end'
   sql.prepare('INSERT INTO bundle_chunks VALUES(?,?,?)').run('test-version',0,'PUBLIC_PRICE_CIPHER');
   let bundle=await (await worker.fetch(await signed('/api/bundle'),env)).json();
   assert.equal(bundle.securityFormat,COST_FORMAT);assert.equal(bundle.cost.configured,false);
+  const fullSync=await (await worker.fetch(await signed('/api/sync',{}),env)).json();
+  assert.equal(fullSync.status,'approved');assert.deepEqual(fullSync.bundle,bundle);
   assert.equal((await admin('cost-password')).status,200);
   assert.equal((await call('/admin/api/cost-password',post({}))).status,401);
   assert.equal((await admin('cost-password',{})).status,400);
@@ -64,8 +75,29 @@ test('device authorization, signed requests, auditing and revocation end to end'
   await assert.rejects(decryptCostEnvelope('Wrong synthetic password',bundle.cost));
   const firstRevision=bundle.costRevision;
   const unchanged=await (await worker.fetch(await signed('/api/bundle?version=test-version&costRevision='+firstRevision),env)).json();assert.equal(unchanged.cost,undefined);
+  const syncInput={version:'test-version',costRevision:firstRevision};
+  executed.length=0;
+  await worker.fetch(await signed('/api/status'),env);
+  await worker.fetch(await signed('/api/bundle?version=test-version&costRevision='+firstRevision),env);
+  const legacyStatements=executed.length;
+  executed.length=0;
+  const syncResult=await (await worker.fetch(await signed('/api/sync',syncInput),env)).json();
+  assert.equal(syncResult.status,'approved');assert.equal(syncResult.approvedAt,sql.prepare('SELECT approved_at FROM devices WHERE id=?').get(id).approved_at);
+  assert.deepEqual(syncResult.bundle,unchanged);
+  assert.ok(executed.length<legacyStatements,'combined sync removes duplicate authentication queries');
+  assert.equal(executed.filter(q=>q.startsWith('SELECT * FROM devices')).length,1,'every sync freshly checks revocation');
+  assert.equal(executed.some(q=>q.includes('FROM bundle_chunks')||q.includes('FROM cost_chunks')),false,'unchanged sync never loads ciphertext chunks');
+  assert.equal(executed.filter(q=>q.startsWith('UPDATE devices SET last_seen')).length,0,'same-minute presence does not cause another device write');
+  const syncReplay=await signed('/api/sync',syncInput);
+  assert.equal((await worker.fetch(syncReplay.clone(),env)).status,200);
+  assert.equal((await worker.fetch(syncReplay,env)).status,409);
+  const tampered=await signed('/api/sync',syncInput);
+  assert.equal((await worker.fetch(new Request(tampered.url,{method:'POST',headers:tampered.headers,body:JSON.stringify({...syncInput,version:'tampered'})}),env)).status,401);
   assert.equal((await admin('cost-password',await createCostPasswordConfig('Synthetic second password'))).status,200);
   const rotated=await (await worker.fetch(await signed('/api/bundle?version=test-version&costRevision='+firstRevision),env)).json();
+  const syncRotated=await (await worker.fetch(await signed('/api/sync',syncInput),env)).json();
+  assert.equal(syncRotated.bundle.costRevision,rotated.costRevision);
+  assert.deepEqual(await decryptCostEnvelope('Synthetic second password',syncRotated.bundle.cost),costRows);
   assert.notEqual(rotated.costRevision,firstRevision);assert.deepEqual(await decryptCostEnvelope('Synthetic second password',rotated.cost),costRows);
   await assert.rejects(decryptCostEnvelope('Synthetic first password',rotated.cost));
   assert.equal(JSON.stringify(sql.prepare('SELECT * FROM admin_audit').all()).includes(firstConfig.wrappingKey),false);
@@ -80,6 +112,8 @@ test('device authorization, signed requests, auditing and revocation end to end'
   assert.equal((await admin('requests',{ids:[requests[0].id],status:'approved'})).status,200);
   assert.equal(sql.prepare("SELECT resolution FROM catalog WHERE sku='TEST-NEW'").get().resolution,'awaiting');
   assert.equal((await admin('devices',{id,status:'revoked'})).status,200);
+  const revokedSync=await (await worker.fetch(await signed('/api/sync',syncInput),env)).json();
+  assert.equal(revokedSync.status,'revoked');assert.equal(revokedSync.bundle,undefined);
   assert.equal((await worker.fetch(await signed('/api/bundle'),env)).status,403);
   assert.equal((await worker.fetch(await signed('/api/requests',{sku:'NO'}),env)).status,403);
   // Backlogged offline searches still reach the admin after revocation, but no keys are returned.

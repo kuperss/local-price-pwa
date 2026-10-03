@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import openpyxl
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cloud import Cloud, ROOT, deployment
+from cloud import Cloud, ROOT, deployment, measured_phase
 import catalog_sync
 
 BASE=ROOT.parent.parent/'價格查詢工具'/'價格查詢'
@@ -91,6 +91,7 @@ def split_costs(rows):
         if len(cost)>1:costs.append(cost)
     return prices,costs
 
+@measured_phase('bundle_publish')
 def publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid=0,catalog_plan=None):
     # The scheduled job uses this checkout: create additive tables before any upload,
     # even when the new Worker has not been deployed yet. General prices remain usable.
@@ -102,14 +103,45 @@ def publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid=0,catalog_plan
     # Include freshness in version so users can verify the latest daily check even if prices are unchanged.
     revision=('\n'+catalog_plan['revision']).encode() if catalog_plan else b''
     version=hashlib.sha256(b'split-costs-v1\n'+fetched.encode()+b'\n'+original+revision).hexdigest()[:32]
+    # Includes protected content as well as normal prices: a cost-only change MUST
+    # rotate ciphertext. Membership/revision also prevents reusing a stale publication.
+    content_fingerprint=hashlib.sha256(b'split-costs-content-v1\n'+
+        json.dumps(rows,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()+revision+
+        json.dumps({'resolved':sorted(resolved),'missing':sorted(missing)},sort_keys=True).encode()).hexdigest()
     product_count=sum(not row.get('_replacements') for row in rows)
     previous=cloud.query(db,"SELECT value FROM settings WHERE key='current_bundle'")
     prior_version=previous[0]['value'] if previous else ''
     fingerprint=version
     prior_report=cloud.query(db,'SELECT report FROM catalog_publications WHERE version=?',[prior_version]) if catalog_plan else []
-    unchanged=(json.loads(prior_report[0]['report']).get('fingerprint')==fingerprint) if prior_report else prior_version==version
+    prior_details=json.loads(prior_report[0]['report']) if prior_report else {}
+    unchanged=(prior_details.get('fingerprint')==fingerprint) if prior_report else prior_version==version
     if unchanged:
         print(f'PRICE_PWA_OK unchanged version={prior_version} products={product_count}');return
+    if catalog_plan and prior_details.get('content_fingerprint')==content_fingerprint:
+        prior=cloud.query(db,'SELECT fetched_at FROM bundles WHERE version=?',[prior_version])
+        if not prior:raise ValueError('Current bundle metadata missing; refusing freshness update')
+        prior_fetched=prior[0]['fetched_at']
+        if datetime.fromisoformat(fetched)<datetime.fromisoformat(prior_fetched):
+            raise ValueError('Older freshness cannot replace newer published check')
+        # Single SQL CAS: freshness can advance without touching either ciphertext,
+        # encryption key, cost wrapping material or catalog membership.
+        refreshed=cloud.query(db,"""UPDATE bundles SET fetched_at=?,published_at=?
+          WHERE version=? AND fetched_at=?
+          AND version=(SELECT value FROM settings WHERE key='current_bundle')
+          AND (SELECT value FROM settings WHERE key='catalog_revision')=? RETURNING version""",
+          [fetched,stamp,prior_version,prior_fetched,catalog_plan['revision']])
+        if not refreshed:raise ValueError('Catalog changed during freshness update; previous bundle retained. Retry next publish.')
+        private=ROOT/'data-private'
+        local=private/'price-data.json'
+        if local.exists():
+            stored=json.loads(local.read_text(encoding='utf-8'))
+            if stored.get('version')==prior_version:
+                stored['fetchedAt']=fetched;atomic(local,stored)
+        atomic(private/'publish-report.json',{'fetched_at':fetched,'version':prior_version,'content_reused':True,
+            'products':product_count,'aliases':len(rows)-product_count,'approved':len(resolved)+len(missing),
+            'invalid_seed_rows':invalid,'missing_skus':missing,'blocked':catalog_plan['blocked']})
+        print(f'PRICE_PWA_OK reused version={prior_version} products={product_count} fetched_at={fetched}')
+        return
     # Independent staging IDs prevent two concurrent uploads from mixing encryption chunks/keys.
     if catalog_plan:version=fingerprint[:20]+uuid.uuid4().hex[:12]
     cost_key=AESGCM.generate_key(bit_length=256);cost_iv=os.urandom(12)
@@ -133,7 +165,8 @@ def publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid=0,catalog_plan
     if catalog_plan:
         for start in range(0,len(resolved),200):
             cloud.query(db,'INSERT OR IGNORE INTO catalog_members(version,sku) SELECT ?,value FROM json_each(?)',[version,json.dumps(resolved[start:start+200])])
-        report={'blocked':catalog_plan['blocked'],'missing':missing,'aliases':len(catalog_plan['aliases']),'fingerprint':fingerprint}
+        report={'blocked':catalog_plan['blocked'],'missing':missing,'aliases':len(catalog_plan['aliases']),
+                'fingerprint':fingerprint,'content_fingerprint':content_fingerprint}
         cloud.query(db,'INSERT OR REPLACE INTO catalog_publications VALUES(?,?,?)',[version,catalog_plan['revision'],json.dumps(report,ensure_ascii=False)])
         published=cloud.query(db,"""INSERT INTO settings(key,value) SELECT 'current_bundle',?
           WHERE (SELECT value FROM settings WHERE key='catalog_revision')=?
@@ -149,17 +182,9 @@ def publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid=0,catalog_plan
     print(f'PRICE_PWA_OK version={version} products={product_count} aliases={len(rows)-product_count} approved={len(resolved)+len(missing)} missing={len(missing)} fetched_at={fetched}')
 
 
-def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--seed',type=Path,default=BASE/'0903.xlsx');ap.add_argument('--cache',type=Path,default=BASE/'SEVICache.json.gz');ap.add_argument('--check-only',action='store_true');args=ap.parse_args()
-    seeds,invalid=read_seed(args.seed)
-    with gzip.open(args.cache,'rt',encoding='utf-8') as f:payload=json.load(f)
-    fetched=payload['fetched_at']
-    if not args.check_only and (datetime.now()-datetime.fromisoformat(fetched)).total_seconds()>24*3600:
-        raise ValueError('V36 cache older than 24 hours; refusing to publish stale prices')
-    if args.check_only:
-        rows,resolved,missing=build(payload,seeds)
-        print(json.dumps({'seed_unique':len(seeds),'invalid_source_rows':invalid,'products':len(rows),'missing':len(missing),'missing_skus':missing,'fetched_at':fetched},ensure_ascii=False));return
-    cfg=deployment();cloud=Cloud();db=cfg['database_id'];stamp=utc()
+@measured_phase('bootstrap_and_membership')
+def run_publish(cloud,db,payload,seeds,invalid=0):
+    stamp=utc();fetched=payload['fetched_at']
     # Bootstrap once; subsequent runs use the approved catalog as the source of scope.
     seeded=cloud.query(db,"SELECT value FROM settings WHERE key='seed_initialized'")
     if not seeded:
@@ -175,6 +200,36 @@ def main():
     if unsafe:raise ValueError('Previously published/retained products missing from cache; previous bundle retained: '+', '.join(sorted(unsafe)))
     rows.extend(publication['aliases'])
     publish_bundle(cloud,db,rows,fetched,resolved,missing,invalid,publication)
+
+def usage_report(cloud,path,status,error_type=None):
+    if not hasattr(cloud,'usage_report'):return
+    try:
+        from usage_monitor import record_usage
+        record_usage(cloud,path,status,error_type)
+    except Exception:
+        # Observability is advisory: an I/O/config error must not mask the original
+        # publication failure or incorrectly turn a successful publish into failure.
+        print('D1_USAGE_REPORT unavailable; publication result unchanged',flush=True)
+
+def main():
+    ap=argparse.ArgumentParser();ap.add_argument('--seed',type=Path,default=BASE/'0903.xlsx');ap.add_argument('--cache',type=Path,default=BASE/'SEVICache.json.gz');ap.add_argument('--check-only',action='store_true');args=ap.parse_args()
+    seeds,invalid=read_seed(args.seed)
+    with gzip.open(args.cache,'rt',encoding='utf-8') as f:payload=json.load(f)
+    fetched=payload['fetched_at']
+    if not args.check_only and (datetime.now()-datetime.fromisoformat(fetched)).total_seconds()>24*3600:
+        raise ValueError('V36 cache older than 24 hours; refusing to publish stale prices')
+    if args.check_only:
+        rows,resolved,missing=build(payload,seeds)
+        print(json.dumps({'seed_unique':len(seeds),'invalid_source_rows':invalid,'products':len(rows),'missing':len(missing),'missing_skus':missing,'fetched_at':fetched},ensure_ascii=False));return
+    cloud=Cloud();db=deployment()['database_id'];status='failed';error_type=None
+    try:
+        run_publish(cloud,db,payload,seeds,invalid)
+        status='completed'
+    except Exception as exc:
+        error_type=type(exc).__name__
+        raise
+    finally:
+        usage_report(cloud,ROOT/'data-private/d1-usage-publish.json',status,error_type)
 
 if __name__=='__main__':
     try:main()

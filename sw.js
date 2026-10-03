@@ -1,7 +1,7 @@
-const CACHE_NAME = "local-price-pwa-v55-catalog";
+const CACHE_NAME = "local-price-pwa-v56-efficient-sync";
 const APP_SHELL = [
-  "./", "./index.html", "./styles.css?v=55", "./app.js?v=55",
-  "./manifest.webmanifest?v=55", "./assets/icon.svg?v=55",
+  "./", "./index.html", "./styles.css?v=56", "./app.js?v=56",
+  "./manifest.webmanifest?v=56", "./assets/icon.svg?v=56",
   "./managed.js", "./managed.css", "./cost-crypto.js", "./cost-session.js", "./search.js",
 ];
 const SHELL_PATHS = new Set(APP_SHELL.map(path => new URL(path, self.location.href).pathname));
