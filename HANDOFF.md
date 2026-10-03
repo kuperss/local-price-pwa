@@ -1,5 +1,24 @@
 # 售價速查新版交接 — 2026-09-21
 
+## 後台清單 2 小時重用＋v56 上線（2026-10-03 已部署）
+
+- 使用者要求「二小時內重複點同一個篩選就不要再讀資料庫」。workers.dev 不能用 Cache API，
+  所以做成**瀏覽器端保留＋伺服器端版本核對**：
+  - `admin/products.js` 的 `listApi()`：每個查詢字串的結果存 sessionStorage 2 小時（最多 30 組，
+    關分頁即清）；期間再點同一組只帶 `If-None-Match`。
+  - `worker/catalog.js` 清單 GET：讀完 settings（約 8 列）就以 `generation＋查詢字串` 算 ETag，
+    相同回 **304、不跑清單／筆數／統計三個大查詢**；不同才照常查並回新 ETag。
+  - 每日發布（`product_fetched_at`／`current_bundle` 變）或任何人改清單（`catalog_revision` 變）都會換 ETag，
+    不會在 2 小時內看到舊資料。仍會讀那約 8 列，這是為了不把舊資料當新資料。
+  - 伺服器 isolate 記憶體快取 TTL 由 5 分鐘改 2 小時（`LIST_CACHE_MS`），以 generation 為鍵，仍是盡力而為。
+- 量測（正式 D1，2026-10-03，部署前）：預設載入 12,139 列、「需要檢查」12,121、「有售轉且零庫存」59,788
+  （這個篩選讓清單與筆數兩句各掃約 3 萬列 product_metadata；尚未優化）。304 時只剩 settings 那句。
+  量測腳本在忽略版控的 `output/measure_admin_click.mjs`（只送 SELECT）。
+- 部署：Worker version `373d888e-884e-4519-884b-1e46ca3ed2c3`，一併上線 v56（讀取快取、POST /api/sync、
+  last_seen 每分鐘一次、D1_USAGE 紀錄）。部署後匿名檢查：首頁 200（v=56）、後台頁與清單 API 302 至 Access、
+  `/api/bundle` 與 `POST /api/sync` 未簽章 401。登入後的實際 304 行為待使用者在後台點擊時以 `wrangler tail` 確認。
+- 測試：Node 32 項（新增 304 重新驗證）、Python 22 項。
+
 ## 每日 metadata 同步改為只寫變動列（2026-10-03，只改 Python，不需部署 Worker）
 
 ### 為什麼

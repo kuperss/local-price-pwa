@@ -37,10 +37,17 @@ const product=async(db,sku)=>(await productMap(db,[sku])).get(sku);
 const productMap=async(db,list)=>list.length?new Map((await all(db,lookupCte+'SELECT * FROM products',[JSON.stringify([...new Set(list)])])).map(r=>[r.sku,r])):new Map();
 const absent=sku=>({sku,missing:1,active:0,tracked:0,live:0,state:'outside',targets:'[]'});
 const caches=new WeakMap();
+// Entries are keyed by generation, so a publish or catalog edit is never served stale;
+// the TTL only bounds how long an unchanged result may be reused (user asked for 2 hours).
+const LIST_CACHE_MS=2*60*60*1000;
 const generation=s=>JSON.stringify([s.catalog_revision||'0',s.product_snapshot||'',s.product_fetched_at||'',s.current_bundle||'']);
+const listTag=async(version,search)=>{
+ const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(version+'\n'+search));
+ return '"'+[...new Uint8Array(digest).slice(0,12)].map(b=>b.toString(16).padStart(2,'0')).join('')+'"';
+};
 function cachedReader(db,version){
  const identity=databaseIdentity(db);let bucket=caches.get(identity);
- if(!bucket||bucket.version!==version){bucket={version,cache:new ReadCache()};caches.set(identity,bucket);}
+ if(!bucket||bucket.version!==version){bucket={version,cache:new ReadCache({ttl:LIST_CACHE_MS})};caches.set(identity,bucket);}
  const prepare=(sql,params=[])=>({
   bind(...values){return prepare(sql,values);},
   async all(){return bucket.cache.get(JSON.stringify([sql,params]),()=>db.prepare(sql).bind(...params).all(),()=>recordCacheHit(db));},
@@ -59,6 +66,11 @@ export async function catalogApi(request,rawDb,url,data,actor){
   return response(value);
  };
  if(request.method==='GET'&&!path){
+  // The admin page keeps each filter's result up to 2 hours and revalidates with this tag.
+  // Unchanged generation → 304 without running the list/count/metrics queries (only the
+  // settings read above, ~8 rows). Any publish or catalog edit changes the tag.
+  const tag=await listTag(version,url.search);
+  if(request.headers.get('If-None-Match')===tag)return new Response(null,{status:304,headers:{'Cache-Control':'no-store',ETag:tag}});
   const p=url.searchParams,params=[],where=[];
   const scope=p.get('scope')||'active';
   const cte=['active','archived','tracked'].includes(scope)?trackedCte:sourceCte;
@@ -82,7 +94,9 @@ export async function catalogApi(request,rawDb,url,data,actor){
   const metrics=await db.prepare(trackedCte+'SELECT '+Object.entries(filters).map(([key,expr])=>`SUM(CASE WHEN (${expr}) THEN 1 ELSE 0 END) AS "${key}"`).join(',')+' FROM products').first();
   const bundle=await db.prepare('SELECT fetched_at,published_at,product_count FROM bundles WHERE version=?').bind(s.current_bundle||'').first();
   const publication=await db.prepare('SELECT report FROM catalog_publications WHERE version=?').bind(s.current_bundle||'').first();
-  return respond({rows,total,metrics,revision:s.catalog_revision||'0',fetchedAt:s.product_fetched_at,snapshot:s.product_snapshot,bundle,report:publication?JSON.parse(publication.report):{}});
+  const listed=await respond({rows,total,metrics,revision:s.catalog_revision||'0',fetchedAt:s.product_fetched_at,snapshot:s.product_snapshot,bundle,report:publication?JSON.parse(publication.report):{}});
+  listed.headers.set('ETag',tag);
+  return listed;
  }
  if(request.method==='GET'&&path==='/detail'){
   const code=normalize(url.searchParams.get('sku'));if(!valid([code]))fail(400,'型號格式錯誤');

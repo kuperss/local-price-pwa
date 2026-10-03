@@ -12,6 +12,27 @@ const state=r=>`<span class="badge state-${esc(r.state)}">${states[r.state]||'�
 function replacementStock(r){const status=stockStatus(r);return `<span class="replacement-stock ${status.tone}" title="實際可用量＝出貨可用量 ${esc(r.shipping??'未知')} ＋ A2外倉 ${esc(r.a2??'未知')}">${esc(status.label)}</span>`;}
 function replacementCell(row){return (row.replacements||[]).map(r=>`<div class="replacement-item"><button class="sku-link" data-detail="${esc(r.sku)}">${esc(r.sku)}</button>${replacementStock(r)}</div>`).join('')||'—';}
 async function api(path='',data){const r=await fetch('/admin/api/products'+path,{method:data?'POST':'GET',headers:{'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined,cache:'no-store'});let value;try{value=await r.json();}catch{throw new Error('登入已逾時，請重新整理並登入管理後台。');}if(!r.ok)throw new Error(value.error||'讀取失敗');return value;}
+// Keep each filter's result up to 2 hours; within that window only ask the server whether the
+// data generation changed (304 = reuse, no list queries). Session-only: cleared when the tab closes.
+const LIST_CACHE_MS=2*60*60*1000,LIST_CACHE_KEY='price-admin-list-cache-v1',LIST_CACHE_MAX=30;
+let listCache={};try{listCache=JSON.parse(sessionStorage.getItem(LIST_CACHE_KEY)||'{}');}catch{}
+function storeList(){try{sessionStorage.setItem(LIST_CACHE_KEY,JSON.stringify(listCache));}catch{listCache={};}}
+async function listApi(query){
+ const now=Date.now();
+ for(const [k,v] of Object.entries(listCache))if(!(now-v.at<LIST_CACHE_MS))delete listCache[k];
+ const hit=listCache[query];
+ const r=await fetch('/admin/api/products?'+query,{headers:hit?{'If-None-Match':hit.etag}:{},cache:'no-store'});
+ if(r.status===304&&hit)return structuredClone(hit.data);
+ let value;try{value=await r.json();}catch{throw new Error('登入已逾時，請重新整理並登入管理後台。');}
+ if(!r.ok)throw new Error(value.error||'讀取失敗');
+ const etag=r.headers.get('ETag');
+ if(etag){
+  delete listCache[query];listCache[query]={etag,at:now,data:value};
+  const keys=Object.keys(listCache);for(const k of keys.slice(0,Math.max(0,keys.length-LIST_CACHE_MAX)))delete listCache[k];
+  storeList();
+ }
+ return structuredClone(value);
+}
 function message(text,error=false){$('#message').textContent=text;$('#message').className=error?'error':'';}
 function save(){try{localStorage.setItem(key,JSON.stringify(view));}catch{}}
 function controls(){for(const id of ['query','scope','state'])$('#'+id).value=view[id==='query'?'q':id];}
@@ -24,7 +45,7 @@ function selection(){const n=selected.size;$('#selection').textContent=n?`已勾
 async function load(){
  const token=++serial;message('讀取清單…');$('#refresh').disabled=true;save();
  try{
-  const data=await api('?'+new URLSearchParams({...view,filters:view.filters.join(',')}));if(token!==serial)return;result=data;selected.clear();selection();filterButtons();
+  const data=await listApi(String(new URLSearchParams({...view,filters:view.filters.join(',')})));if(token!==serial)return;result=data;selected.clear();selection();filterButtons();
   $('#source-time').textContent=date(data.fetchedAt);$('#live-time').textContent=data.bundle?`${date(data.bundle.fetched_at)} · ${data.bundle.product_count.toLocaleString()} 筆`:'尚未發布';
   const attention=view.filters.includes('attention');$('#attention-head').hidden=!attention;$('#attention-note').hidden=!attention;
   $('#rows').innerHTML=data.rows.map(r=>`<tr><td><input type="checkbox" data-select="${esc(r.sku)}" aria-label="選取 ${esc(r.sku)}"></td><td><button class="sku-link" data-detail="${esc(r.sku)}">${esc(r.sku)}</button><small>${esc(r.changes)}</small>${r.issue?`<small class="negative">${esc(r.issue)}</small>`:''}</td><td>${esc(r.name||'來源查無資料')}${r.note?`<small>備註：${esc(r.note)}</small>`:''}</td><td>${r.sale==='Y'?'<span class="badge">Y</span>':esc(r.sale||'—')}</td><td>${r.discontinued==='Y'?'<span class="badge">Y</span>':esc(r.discontinued||'—')}</td><td>${num(r.shipping)}</td><td>${operational(r.a2,'a2')}</td><td>${num(r.available)}</td><td>${operational(r.incoming,'incoming')}</td><td>${replacementCell(r)}</td><td>${state(r)}</td>${attention?`<td class="attention-reasons">${(r.attentionReasons||[]).map(reason=>`<div>${esc(reason)}</div>`).join('')||'—'}</td>`:''}<td><div class="row-actions">${r.active?`<button class="replace-action" data-replace="${esc(r.sku)}">取代</button>`:''}<button data-action="${r.active?'remove':'add'}" data-sku="${esc(r.sku)}">${r.active?'移出':r.tracked?'恢復':'加入'}</button></div></td></tr>`).join('')||'<tr><td colspan="13" class="empty">沒有符合條件的型號。可清除篩選，或改查完整產品來源。</td></tr>';

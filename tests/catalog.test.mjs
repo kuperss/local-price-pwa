@@ -170,3 +170,23 @@ test('list returns replacement stock outside the selected catalog, including unk
   assert.equal(sql.prepare("SELECT COUNT(*) n FROM catalog WHERE sku='NEW'").get().n,0);
  }finally{sql.close();}
 });
+
+test('list revalidation returns 304 without list queries until data or catalog changes',async()=>{
+ const {sql,DB}=fixture();try{
+  const queries=[];const counted={prepare(q){queries.push(q);return DB.prepare(q);}};
+  const get=async(search,etag)=>{const url=new URL('https://test/admin/api/products'+search);
+   return catalogApi(new Request(url,{headers:etag?{'If-None-Match':etag}:{}}),counted,url,{},'owner@test');};
+  const first=await get('?scope=tracked&filters=transfer_zero');assert.equal(first.status,200);
+  const tag=first.headers.get('ETag');assert.match(tag,/^"[0-9a-f]{24}"$/);
+  queries.length=0;
+  const again=await get('?scope=tracked&filters=transfer_zero',tag);
+  assert.equal(again.status,304);assert.equal(again.headers.get('ETag'),tag);
+  assert.equal(queries.length,1);assert.match(queries[0],/FROM settings/);
+  // Another filter never reuses this tag.
+  assert.equal((await get('?scope=tracked&filters=attention',tag)).status,200);
+  // A new source snapshot time or catalog edit changes the tag → full read.
+  sql.exec("INSERT INTO settings VALUES('product_fetched_at','2026-10-03') ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+  const after=await get('?scope=tracked&filters=transfer_zero',tag);
+  assert.equal(after.status,200);assert.notEqual(after.headers.get('ETag'),tag);
+ }finally{sql.close();}
+});
