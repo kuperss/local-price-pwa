@@ -190,7 +190,7 @@ def plan(cloud,db,payload):
 
 def main():
     ap=argparse.ArgumentParser(description='Initialize admin metadata only; never changes price bundle')
-    ap.add_argument('--cache',type=Path,default=ROOT.parent.parent/'價格查詢工具/價格查詢/SEVICache.json.gz')
+    ap.add_argument('--cache',type=Path,default=ROOT.parent.parent/'價格查詢工具/數據分析/erp_snapshot.json.gz')
     args=ap.parse_args()
     with gzip.open(args.cache,'rt',encoding='utf-8') as f:payload=json.load(f)
     # Import only for the command-line entry point (publish_data imports this module).

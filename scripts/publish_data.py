@@ -20,6 +20,8 @@ from cloud import Cloud, ROOT, deployment, measured_phase
 import catalog_sync
 
 BASE=ROOT.parent.parent/'價格查詢工具'/'價格查詢'
+# 共用產品快照（2026-10-04 起取代 V36 的 SEVICache.json.gz；欄位是它的超集，料號為真料號鍵）
+SNAPSHOT=ROOT.parent.parent/'價格查詢工具'/'數據分析'/'erp_snapshot.json.gz'
 COST_SCHEMA=[sql.strip() for sql in (ROOT/'worker/schema.sql').read_text(encoding='utf-8').split(';')
              if sql.strip().startswith(('CREATE TABLE IF NOT EXISTS cost_bundles ', 'CREATE TABLE IF NOT EXISTS cost_chunks('))]
 def clean(code):
@@ -42,9 +44,16 @@ def read_seed(path):
         return sorted(codes),invalid
     finally:wb.close()
 
+# 料檔只帶這些欄位（= 原 V36 快取的欄位）。共用產品快照是 BI 原始列的超集（含 E/F 價、IMA133，
+# 日後 BI 新增的欄位也會跟著進來），沒有白名單就會靜靜發布到業務手機上。要加欄位請明確加在這裡。
+PRODUCT_FIELDS={'IMA01','IMA130','IMA140','TA_IMA107','IMA02','IMA021','出貨可用量','在途量','到貨日','主儲位',
+ 'A2外倉','建議售價','銷售成本','價格模式','A','B','C','D','搭贈1','搭贈2','搭贈3','IMAUD01','條碼','包裝數量',
+ '單位','單入長(cm)','單入寬(cm)','單入高(cm)','外箱長度(cm)','外箱寬度(cm)','外箱高度(cm)','外包裝(支/箱)',
+ '單位淨重(g)','整箱毛重(KG)'}
+
 def product(row,specs):
     mapping={'IMA01':'型號','IMA02':'中文品名','IMA130':'售架','IMA140':'停產','TA_IMA107':'售轉料號','IMA021':'包裝規格(小/中/大)','A':'底價','B':'量價','C':'開盤價','IMAUD01':'備註'}
-    out={mapping.get(k,k):str(v).strip() for k,v in row.items() if v is not None and str(v).strip() and k not in ['搭贈1','搭贈2','搭贈3']}
+    out={mapping.get(k,k):str(v).strip() for k,v in row.items() if k in PRODUCT_FIELDS and v is not None and str(v).strip() and k not in ['搭贈1','搭贈2','搭贈3']}
     bonus=[str(row.get(k) or '').strip() for k in ['搭贈1','搭贈2','搭贈3']]
     if any(bonus):out['搭贈']=' / '.join(v for v in bonus if v)
     for prefix,fields in [('單入尺寸(cm)',['單入長(cm)','單入寬(cm)','單入高(cm)']),('外箱尺寸(cm)',['外箱長度(cm)','外箱寬度(cm)','外箱高度(cm)'])]:
@@ -212,12 +221,16 @@ def usage_report(cloud,path,status,error_type=None):
         print('D1_USAGE_REPORT unavailable; publication result unchanged',flush=True)
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--seed',type=Path,default=BASE/'0903.xlsx');ap.add_argument('--cache',type=Path,default=BASE/'SEVICache.json.gz');ap.add_argument('--check-only',action='store_true');args=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--seed',type=Path,default=BASE/'0903.xlsx');ap.add_argument('--cache',type=Path,default=SNAPSHOT);ap.add_argument('--check-only',action='store_true');args=ap.parse_args()
     seeds,invalid=read_seed(args.seed)
     with gzip.open(args.cache,'rt',encoding='utf-8') as f:payload=json.load(f)
     fetched=payload['fetched_at']
     if not args.check_only and (datetime.now()-datetime.fromisoformat(fetched)).total_seconds()>24*3600:
-        raise ValueError('V36 cache older than 24 hours; refusing to publish stale prices')
+        raise ValueError('Product snapshot older than 24 hours; refusing to publish stale prices')
+    # 2026-10-04 前的舊格式快照沒有搭贈／在途／條碼欄；拿它發布會讓那幾欄在手機上整欄消失且不報錯
+    sample=list(payload['master'].values())[:200]
+    if sample and not all(k in r for r in sample for k in ('搭贈1','在途量','條碼')):
+        raise ValueError('Product snapshot lacks 搭贈／在途量／條碼 (old format); rerun export_erp_snapshot.py first')
     if args.check_only:
         rows,resolved,missing=build(payload,seeds)
         print(json.dumps({'seed_unique':len(seeds),'invalid_source_rows':invalid,'products':len(rows),'missing':len(missing),'missing_skus':missing,'fetched_at':fetched},ensure_ascii=False));return
