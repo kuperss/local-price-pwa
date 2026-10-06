@@ -56,6 +56,15 @@ const COPY_LABELS = {
   openingPrice: "單價",
 };
 
+const PRICE_KEYS = new Set(["basePrice", "tierPrice", "openingPrice", "retailPrice"]);
+
+// 價格只拿掉沒有意義的小數（492.0 → 492）；真有小數（12.5）則保留。
+function formatPrice(key, value) {
+  const text = String(value ?? "").trim();
+  if (!PRICE_KEYS.has(key) || !/^\d+\.\d+$/.test(text)) return value;
+  return text.replace(/\.?0+$/, "");
+}
+
 const state = {
   bundle: null,
   entries: [],
@@ -550,7 +559,7 @@ function renderCard(entry) {
 
 function renderPriceChip(entry, key, copyable = false) {
   const column = COLUMN_DEFS.find((item) => item.key === key);
-  const value = entry[key] || "-";
+  const value = formatPrice(key, entry[key]) || "-";
   const dataset = copyable ? `data-copy-entry="${escapeHtml(entry.id)}" data-copy-key="${key}"` : "";
 
   return `
@@ -618,7 +627,7 @@ async function copyField(entry, key) {
     entry.sku,
     entry.productName,
     label,
-    value,
+    formatPrice(key, value),
   ]
     .map((part) => String(part || "").trim())
     .filter(Boolean)
@@ -1065,7 +1074,7 @@ function openDetail(entry, {audit=true} = {}) {
 
   refs.copyActions.innerHTML = COPYABLE_PRICE_KEYS.map((key) => {
     const label = getCopyLabel(key);
-    const value = entry[key] || "-";
+    const value = formatPrice(key, entry[key]) || "-";
     const disabled = entry[key] ? "" : "disabled";
     return `
       <button class="copy-button" type="button" data-detail-copy="${key}" ${disabled}>
@@ -1093,7 +1102,7 @@ function openDetail(entry, {audit=true} = {}) {
 }
 
 function renderDetailItem(column, entry) {
-  const value = entry[column.key] || "-";
+  const value = formatPrice(column.key, entry[column.key]) || "-";
   const copyable = entry[column.key]
     ? `data-copy-value="${escapeHtml(value)}" data-copy-key="${escapeHtml(column.key)}"`
     : "";
