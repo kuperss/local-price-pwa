@@ -60,13 +60,20 @@
 ### 現在的做法（`scripts/catalog_sync.py` 的 `sync_metadata`）
 
 1. 輸入相同 → 略過（不變）；所有白名單欄位相同 → 只更新時間（不變）。
-2. **新增：有現行快照、沒有料號被刪除、變動列的 JSON ≤ `DELTA_MAX_BYTES`（900 KB）**：
+2. **新增：有現行快照、變動列與被刪料號的 JSON 各 ≤ `DELTA_MAX_BYTES`（900 KB）**：
    - 先以 CAS 把 `product_metadata_input` 換成本次的 `claim-…` 記號（佔位）；
+   - ERP 刪掉的料號用**一句**受同樣條件保護的 `DELETE … sku IN (SELECT value FROM json_each(?))` 刪掉
+     （2026-10-07 起，見下方）。先刪再 upsert：中間中斷時剩下的列仍是前一天的值，重跑算出的異動標記相同；
    - **一句** `INSERT … SELECT FROM json_each(?) … ON CONFLICT(snapshot,sku) DO UPDATE` 把變動列寫進
      現行快照，WHERE 要求快照指標仍是現行、且佔位記號仍是自己 —— 被別人搶走就一列都不寫；
    - 再以 CAS 從自己的記號切到新輸入並更新 `product_fetched_at`。
    - 快照 ID 不變。Worker 的 `generation` 含 `product_fetched_at`，讀取快取與 409 檢查照常失效。
-3. 有料號從 ERP 消失、變動過大或第一次建立 → 仍走原本整份重建＋退役清理。
+3. 變動過大或第一次建立 → 仍走原本整份重建＋退役清理。
+
+> **2026-10-07 為什麼把「料號消失」移出整份重建**：ERP 刪掉 1 個組合品 `D-25064-DOHWES`（可用量 0），
+> 舊規則就整份重建 29,012 列＋刪除退役快照，一次發布寫入 **93,095 列**，Cloudflare 寄出 94% 警告。
+> ERP 偶爾刪品號是常態，每次都會這樣。查法：GraphQL `d1QueriesAdaptiveGroups`（依 query、datetimeHour 拆）
+> 找出是哪句 SQL，再到 D1 唯讀比對兩份 snapshot 的料號差集。修正 commit `4dcf886`，新增 3 項測試（舊程式上皆失敗）。
 
 ### 保證與代價
 
