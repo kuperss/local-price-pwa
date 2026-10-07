@@ -112,25 +112,36 @@ def sync_metadata(cloud,db,payload):
         return current
     # Daily stock movement touches ~2,500 of ~29,000 SKUs. Rewriting the whole snapshot
     # cost ~87,000 rows_written/day (87% of the D1 free 100,000), so update only changed
-    # rows of the live snapshot. Removed SKUs or an oversized delta use the full path.
-    if current and not previous.keys()-generated.keys():
+    # rows of the live snapshot. Only an oversized delta uses the full path.
+    if current:
         changed=[r for code,r in generated.items() if previous.get(code)!=r]
         batch=json.dumps(changed,ensure_ascii=False,separators=(',',':'))
-        if len(batch.encode())<=DELTA_MAX_BYTES:
-            # Claim first: the guarded upsert only lands while this run still owns the
+        # ERP deletes a SKU now and then (2026-10-07: one dead combo SKU). That used to
+        # force the full path: 29,000 inserts plus deleting the retired snapshot cost
+        # 93,095 rows_written in one run (93% of the daily free quota).
+        removed=json.dumps(sorted(previous.keys()-generated.keys()),ensure_ascii=False)
+        if len(batch.encode())<=DELTA_MAX_BYTES and len(removed.encode())<=DELTA_MAX_BYTES:
+            # Claim first: the guarded writes only land while this run still owns the
             # input marker, so two publishers cannot interleave rows. The upsert is one
             # statement (atomic); an interruption leaves the previous complete rows.
             claim='claim-'+uuid.uuid4().hex[:12]
             switch_metadata(cloud,db,{'product_metadata_input':claim},current,previous_input)
-            cloud.query(db,'INSERT INTO product_metadata(snapshot,'+','.join(FIELDS)+') SELECT ?,'+
-                        ','.join("json_extract(value,'$."+f+"')" for f in FIELDS)+' FROM json_each(?)'
-                        " WHERE (SELECT value FROM settings WHERE key='product_snapshot')=?"
-                        " AND (SELECT value FROM settings WHERE key='product_metadata_input')=?"
-                        ' ON CONFLICT(snapshot,sku) DO UPDATE SET '+
-                        ','.join(f+'=excluded.'+f for f in FIELDS if f!='sku'),[current,batch,current,claim])
+            # Delete before upsert: if interrupted in between, the remaining rows are still
+            # yesterday's, so the retry recomputes the same change flags.
+            if removed!='[]':
+                cloud.query(db,'DELETE FROM product_metadata WHERE snapshot=? AND sku IN (SELECT value FROM json_each(?))'
+                            " AND (SELECT value FROM settings WHERE key='product_snapshot')=?"
+                            " AND (SELECT value FROM settings WHERE key='product_metadata_input')=?",[current,removed,current,claim])
+            if changed:
+                cloud.query(db,'INSERT INTO product_metadata(snapshot,'+','.join(FIELDS)+') SELECT ?,'+
+                            ','.join("json_extract(value,'$."+f+"')" for f in FIELDS)+' FROM json_each(?)'
+                            " WHERE (SELECT value FROM settings WHERE key='product_snapshot')=?"
+                            " AND (SELECT value FROM settings WHERE key='product_metadata_input')=?"
+                            ' ON CONFLICT(snapshot,sku) DO UPDATE SET '+
+                            ','.join(f+'=excluded.'+f for f in FIELDS if f!='sku'),[current,batch,current,claim])
             switch_metadata(cloud,db,{'product_fetched_at':payload['fetched_at'],
                             'product_metadata_input':input_version},current,claim)
-            print(f'CATALOG_METADATA_OK delta changed={len(changed)} products={len(rows)} fetched_at={payload["fetched_at"]}')
+            print(f'CATALOG_METADATA_OK delta changed={len(changed)} removed={len(json.loads(removed))} products={len(rows)} fetched_at={payload["fetched_at"]}')
             return current
     fields=FIELDS
     # Separate concurrent staging even for the same input; computed change flags can

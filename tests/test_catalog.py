@@ -208,15 +208,54 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),'2026-09-18T10:00:00')
         self.assertEqual(catalog.setting(self.cloud,'','product_metadata_input')[:19],'2026-09-18T10:00:00')
 
-    def test_removed_sku_or_oversized_delta_builds_full_snapshot(self):
-        p=payload();first=catalog.sync_metadata(self.cloud,'',p)
+    def test_removed_sku_deletes_only_that_row(self):
+        # 2026-10-07: ERP deleted one SKU and the full path wrote 93,095 rows.
+        p=payload();first=catalog.sync_metadata(self.cloud,'',p);original=self.cloud.query;queries=[]
+        def recording(db,sql,params=None):
+            queries.append((sql,params));return original(db,sql,params)
         p['fetched_at']='2026-09-18T10:00:00';del p['master']['UNK']
-        second=catalog.sync_metadata(self.cloud,'',p)
-        self.assertNotEqual(second,first)
-        self.assertEqual(len(self.cloud.query('', 'SELECT sku FROM product_metadata WHERE snapshot=?',[second])),2)
+        with patch.object(self.cloud,'query',recording):second=catalog.sync_metadata(self.cloud,'',p)
+        self.assertEqual(second,first)
+        self.assertEqual([r['sku'] for r in original('', 'SELECT sku FROM product_metadata WHERE snapshot=? ORDER BY sku',[first])],['NEW','OLD'])
+        deletes=[params for sql,params in queries if 'DELETE FROM product_metadata' in sql]
+        self.assertEqual([json.loads(params[1]) for params in deletes],[['UNK']])
+        # Nothing else changed, so no upsert is sent.
+        self.assertFalse(any('INTO product_metadata' in sql for sql,_ in queries))
+        self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),'2026-09-18T10:00:00')
+
+    def test_removed_source_marks_dependent_and_lost_claim_deletes_nothing(self):
+        p=payload();first=catalog.sync_metadata(self.cloud,'',p);original=self.cloud.query
+        p['fetched_at']='2026-09-18T10:00:00';del p['master']['NEW']
+        def competing(db,sql,params=None):
+            if 'DELETE FROM product_metadata' in sql:
+                original(db,"UPDATE settings SET value='other-input' WHERE key='product_metadata_input'")
+            return original(db,sql,params)
+        with patch.object(self.cloud,'query',competing),self.assertRaisesRegex(ValueError,'Metadata changed'):
+            catalog.sync_metadata(self.cloud,'',p)
+        self.assertEqual(len(original('', 'SELECT sku FROM product_metadata WHERE snapshot=?',[first])),3)
+        self.assertEqual(catalog.sync_metadata(self.cloud,'',p),first)
+        rows={r['sku']:r for r in original('', 'SELECT sku,issue FROM product_metadata WHERE snapshot=?',[first])}
+        self.assertEqual(set(rows),{'OLD','UNK'})
+        self.assertEqual(rows['OLD']['issue'],'售轉料號查無來源')
+
+    def test_interrupted_removal_recovers_with_same_change_flags(self):
+        p=payload();first=catalog.sync_metadata(self.cloud,'',p);original=self.cloud.query
+        p['fetched_at']='2026-09-18T10:00:00';del p['master']['UNK'];p['master']['NEW']['出貨可用量']='2'
+        def failing(db,sql,params=None):
+            if 'INTO product_metadata' in sql:raise RuntimeError('network')
+            return original(db,sql,params)
+        with patch.object(self.cloud,'query',failing),self.assertRaises(RuntimeError):catalog.sync_metadata(self.cloud,'',p)
+        self.assertEqual(catalog.setting(self.cloud,'','product_fetched_at'),'2026-09-17T10:00:00')
+        self.assertEqual(catalog.sync_metadata(self.cloud,'',p),first)
+        rows={r['sku']:r for r in original('', 'SELECT sku,changes FROM product_metadata WHERE snapshot=?',[first])}
+        self.assertEqual(set(rows),{'NEW','OLD'})
+        self.assertEqual(rows['NEW']['changes'],'新歸零')
+
+    def test_oversized_delta_builds_full_snapshot(self):
+        p=payload();first=catalog.sync_metadata(self.cloud,'',p)
         p['fetched_at']='2026-09-19T10:00:00';p['master']['NEW']['IMA02']='x'
-        with patch.object(catalog,'DELTA_MAX_BYTES',10):third=catalog.sync_metadata(self.cloud,'',p)
-        self.assertNotIn(third,(first,second))
+        with patch.object(catalog,'DELTA_MAX_BYTES',10):second=catalog.sync_metadata(self.cloud,'',p)
+        self.assertNotEqual(second,first)
 
     def test_delta_lost_claim_writes_nothing(self):
         p=payload();first=catalog.sync_metadata(self.cloud,'',p);original=self.cloud.query
